@@ -1,0 +1,34 @@
+{
+  "source": {
+    "host": "source-fe.example.com",
+    "port": 9030,
+    "user": "root",
+    "password": "${SOURCE_PASSWORD}",
+    "session": ["query_timeout=7200"]
+  },
+  "target": {
+    "host": "target-fe.example.com",
+    "port": 9030,
+    "user": "root",
+    "password": "${TARGET_PASSWORD}",
+    "session": ["query_timeout=7200"]
+  },
+  "databases": [
+    {"source": "source_db", "target": "target_db"}
+  ],
+  "s3": {
+    "bucket": "example-backup-bucket",
+    "prefix": "backups/partition-sync/run01",
+    "region": "cn-shanghai",
+    "endpoint": "https://oss-cn-shanghai.aliyuncs.com",
+    "pathStyle": false,
+    "authMode": "static",
+    "accessKey": "${S3_ACCESS_KEY}",
+    "secretKey": "${S3_SECRET_KEY}",
+    "maxFileSize": "1024MB"
+  },
+  "stateFile": "./partition-sync-state.db",
+  "includeTables": "",
+  "excludeTables": "",
+  "interval": "1h"
+}

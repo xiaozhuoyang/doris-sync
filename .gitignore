@@ -1,0 +1,7 @@
+/dist/
+*.db
+*.db-shm
+*.db-wal
+*.db.lock
+partition-sync.json
+partition-sync.env
