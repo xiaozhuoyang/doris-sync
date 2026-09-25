@@ -25,16 +25,17 @@ type DatabasePair struct {
 }
 
 type S3Options struct {
-	Bucket      string `json:"bucket"`
-	Prefix      string `json:"prefix"`
-	Region      string `json:"region"`
-	Endpoint    string `json:"endpoint"`
-	PathStyle   bool   `json:"pathStyle"`
-	AuthMode    string `json:"authMode"`
-	AccessKey   string `json:"accessKey"`
-	SecretKey   string `json:"secretKey"`
-	RoleARN     string `json:"roleArn"`
-	MaxFileSize string `json:"maxFileSize"`
+	Bucket         string `json:"bucket"`
+	Prefix         string `json:"prefix"`
+	Region         string `json:"region"`
+	Endpoint       string `json:"endpoint"`
+	ClientEndpoint string `json:"clientEndpoint"`
+	PathStyle      bool   `json:"pathStyle"`
+	AuthMode       string `json:"authMode"`
+	AccessKey      string `json:"accessKey"`
+	SecretKey      string `json:"secretKey"`
+	RoleARN        string `json:"roleArn"`
+	MaxFileSize    string `json:"maxFileSize"`
 }
 
 type Options struct {

@@ -5,3 +5,4 @@
 *.db.lock
 partition-sync.json
 partition-sync.env
+minimax-sync*.log

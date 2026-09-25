@@ -287,11 +287,6 @@ func (s *syncer) syncTable(ctx context.Context, pair DatabasePair, table string,
 	if err != nil {
 		return err
 	}
-	if len(parts) == 0 {
-		summary.skipped++
-		s.logger.Printf("SKIP_TABLE database=%s table=%s reason=no_partitions", pair.Source, table)
-		return nil
-	}
 	columnJSON, _ := json.Marshal(columns)
 	hash := sha256.Sum256(columnJSON)
 	schemaHash := hex.EncodeToString(hash[:])
@@ -321,6 +316,10 @@ func (s *syncer) syncTable(ctx context.Context, pair DatabasePair, table string,
 	s.state.Tables[tableKey] = schemaHash
 	if err := s.state.saveTable(tableKey); err != nil {
 		return err
+	}
+	if len(parts) == 0 {
+		s.logger.Printf("EMPTY_TABLE database=%s table=%s", pair.Source, table)
+		return nil
 	}
 	columnNames := make([]string, len(columns))
 	for i, col := range columns {

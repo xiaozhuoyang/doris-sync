@@ -16,7 +16,75 @@ func targetDDL(ddl, db, table string) (string, error) {
 	if !createPrefix.MatchString(ddl) {
 		return "", fmt.Errorf("unsupported SHOW CREATE TABLE result")
 	}
-	return createPrefix.ReplaceAllStringFunc(ddl, func(_ string) string { return "CREATE TABLE " + qtable(db, table) }), nil
+	result := createPrefix.ReplaceAllStringFunc(ddl, func(_ string) string { return "CREATE TABLE " + qtable(db, table) })
+	return omitAutoPartitionDefinitions(result)
+}
+
+var autoPartitionClause = regexp.MustCompile(`(?i)\bAUTO\s+PARTITION\s+BY\s+(?:RANGE|LIST)\b`)
+var distributionClause = regexp.MustCompile(`(?im)^[ \t]*DISTRIBUTED[ \t]+BY\b`)
+
+func omitAutoPartitionDefinitions(ddl string) (string, error) {
+	match := autoPartitionClause.FindStringIndex(ddl)
+	if match == nil {
+		return ddl, nil
+	}
+	expressionStart := strings.IndexByte(ddl[match[1]:], '(')
+	if expressionStart < 0 {
+		return "", fmt.Errorf("AUTO PARTITION expression is missing")
+	}
+	expressionEnd, err := closingParen(ddl, match[1]+expressionStart)
+	if err != nil {
+		return "", err
+	}
+	definitionStart := expressionEnd + 1
+	for definitionStart < len(ddl) && (ddl[definitionStart] == ' ' || ddl[definitionStart] == '\n' || ddl[definitionStart] == '\r' || ddl[definitionStart] == '\t') {
+		definitionStart++
+	}
+	if definitionStart >= len(ddl) || ddl[definitionStart] != '(' {
+		return "", fmt.Errorf("AUTO PARTITION definitions are missing")
+	}
+	distribution := distributionClause.FindStringIndex(ddl[definitionStart:])
+	if distribution == nil {
+		return "", fmt.Errorf("AUTO PARTITION definitions have no DISTRIBUTED BY boundary")
+	}
+	distributionStart := definitionStart + distribution[0]
+	definitions := strings.TrimSpace(ddl[definitionStart:distributionStart])
+	if !strings.HasPrefix(definitions, "(") || !strings.HasSuffix(definitions, ")") {
+		return "", fmt.Errorf("unexpected AUTO PARTITION definitions")
+	}
+	return ddl[:definitionStart] + "()\n" + ddl[distributionStart:], nil
+}
+
+func closingParen(sql string, start int) (int, error) {
+	depth := 0
+	quote := byte(0)
+	for i := start; i < len(sql); i++ {
+		c := sql[i]
+		if quote != 0 {
+			if c == '\\' && i+1 < len(sql) {
+				i++
+			} else if c == quote {
+				if i+1 < len(sql) && sql[i+1] == quote {
+					i++
+				} else {
+					quote = 0
+				}
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			quote = c
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("unclosed parenthesis in AUTO PARTITION clause")
 }
 
 func outfileSQL(db, table, partition, uri string, columns []string, cfg S3Options) string {

@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -19,6 +20,8 @@ type objectStore struct {
 	client  *s3.Client
 	options S3Options
 }
+
+const objectRequestTimeout = 45 * time.Second
 
 func openObjectStore(ctx context.Context, o S3Options) (*objectStore, error) {
 	var configOptions []func(*awsconfig.LoadOptions) error
@@ -35,8 +38,12 @@ func openObjectStore(ctx context.Context, o S3Options) (*objectStore, error) {
 	}
 	client := s3.NewFromConfig(awsCfg, func(opt *s3.Options) {
 		opt.UsePathStyle = o.PathStyle
-		if o.Endpoint != "" {
-			opt.BaseEndpoint = aws.String(o.Endpoint)
+		endpoint := o.ClientEndpoint
+		if endpoint == "" {
+			endpoint = o.Endpoint
+		}
+		if endpoint != "" {
+			opt.BaseEndpoint = aws.String(endpoint)
 		}
 	})
 	return &objectStore{client: client, options: o}, nil
@@ -53,7 +60,9 @@ func (s *objectStore) list(ctx context.Context, prefix string) ([]string, error)
 	var keys []string
 	pager := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{Bucket: aws.String(s.options.Bucket), Prefix: aws.String(prefix)})
 	for pager.HasMorePages() {
-		page, err := pager.NextPage(ctx)
+		requestCtx, cancel := context.WithTimeout(ctx, objectRequestTimeout)
+		page, err := pager.NextPage(requestCtx)
+		cancel()
 		if err != nil {
 			return nil, err
 		}
@@ -74,12 +83,17 @@ func (s *objectStore) clear(ctx context.Context, prefix string) error {
 	}
 	pager := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{Bucket: aws.String(s.options.Bucket), Prefix: aws.String(prefix)})
 	for pager.HasMorePages() {
-		page, err := pager.NextPage(ctx)
+		requestCtx, cancel := context.WithTimeout(ctx, objectRequestTimeout)
+		page, err := pager.NextPage(requestCtx)
+		cancel()
 		if err != nil {
 			return err
 		}
 		for _, obj := range page.Contents {
-			if _, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(s.options.Bucket), Key: obj.Key}); err != nil {
+			requestCtx, cancel := context.WithTimeout(ctx, objectRequestTimeout)
+			_, err := s.client.DeleteObject(requestCtx, &s3.DeleteObjectInput{Bucket: aws.String(s.options.Bucket), Key: obj.Key})
+			cancel()
+			if err != nil {
 				return err
 			}
 		}

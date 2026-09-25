@@ -14,16 +14,16 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/doris-partition-sync-linu
 Build a self-contained Linux amd64 package on macOS or Linux:
 
 ```bash
-sh deploy/build-package.sh v1.0.0
+sh deploy/build-package.sh v1.0.1
 ```
 
-The resulting `dist/doris-partition-sync-v1.0.0-linux-amd64.tar.gz` contains the static executable, example config, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
+The resulting `dist/doris-partition-sync-v1.0.1-linux-amd64.tar.gz` contains the static executable, example config, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
 
 On the Linux host, extract the package, prepare real config and credentials, then install and start the service:
 
 ```bash
-tar -xzf doris-partition-sync-v1.0.0-linux-amd64.tar.gz
-cd doris-partition-sync-v1.0.0-linux-amd64
+tar -xzf doris-partition-sync-v1.0.1-linux-amd64.tar.gz
+cd doris-partition-sync-v1.0.1-linux-amd64
 cp partition-sync.example.json partition-sync.json
 cp partition-sync.env.example partition-sync.env
 # Edit partition-sync.json and partition-sync.env for your source, target, bucket, and credentials.
@@ -67,9 +67,11 @@ The interval defaults to `1h`, can be set in the config as `interval`, and can b
 
 For AWS IAM, set `authMode` to `iam`, remove `accessKey` and `secretKey`, set `region` and optionally `roleArn`. The local process uses the AWS default credential chain or assumes `roleArn`; the FE uses `s3.role_arn` when it is configured. The FE/BE nodes must be authorized to read and write the bucket independently of the tool process.
 
+If the SelectDB nodes use a private OSS/S3 endpoint but the sync process runs outside that network, set `s3.endpoint` to the private endpoint and `s3.clientEndpoint` to the public endpoint. OUTFILE and S3 TVF use `endpoint`; local object listing and cleanup use `clientEndpoint` (or `endpoint` when omitted).
+
 ## Workflow
 
-1. `SHOW TABLES`, `SHOW CREATE TABLE`, `DESC`, and `SHOW PARTITIONS` discover the source. Async materialized views are skipped. Existing target tables are checked for matching columns; missing target tables are created from source DDL.
+1. `SHOW TABLES`, `SHOW CREATE TABLE`, `DESC`, and `SHOW PARTITIONS` discover the source. Async materialized views are skipped. Existing target tables are checked for matching columns; missing target tables are created from source DDL, including empty tables. For automatic partitioning, source partition instances are omitted from the target DDL so the target creates partitions as data arrives.
 2. Partitions are sorted by range start (or name where no date range is available) and processed sequentially, oldest first.
 3. Each partition uses `s3://bucket/prefix/source_db/target_db/table/partition/`, so separate target mappings never share backup objects. SQLite stores partition ID and `VisibleVersion`. Initial sync exports the full partition. The target partition is matched by the lower and upper bounds in `SHOW PARTITIONS.Range` when available, falling back to `PartitionName` if range bounds cannot be parsed.
 4. In `overwrite` mode, a changed partition clears its backup prefix, reruns full OUTFILE, then atomically replaces only the matching target partition with one `INSERT OVERWRITE TABLE ... PARTITION(target_name)`. It does not truncate first. A missing target partition is restored using auto partitioning.

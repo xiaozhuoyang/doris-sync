@@ -19,15 +19,31 @@ func TestTargetDDL(t *testing.T) {
 	}
 }
 
+func TestTargetDDLRemovesAutoPartitionList(t *testing.T) {
+	ddl := "CREATE TABLE `events` (`dt` datetime(6), `value` text) ENGINE=OLAP\n" +
+		"AUTO PARTITION BY RANGE (date_trunc(`dt`, 'hour'))\n" +
+		"(PARTITION p1 VALUES [('2026-09-01 00:00:00'), ('2026-09-01 01:00:00')),\n" +
+		" PARTITION p2 VALUES [('2026-09-01 01:00:00'), ('2026-09-01 02:00:00')))\n" +
+		"DISTRIBUTED BY RANDOM BUCKETS 16"
+	target, err := targetDDL(ddl, "minimax_target", "events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(target, "AUTO PARTITION BY RANGE (date_trunc(`dt`, 'hour'))\n()") ||
+		strings.Contains(target, "PARTITION p1") || strings.Contains(target, "PARTITION p2") || !strings.Contains(target, "DISTRIBUTED BY RANDOM BUCKETS 16") {
+		t.Fatal(target)
+	}
+}
+
 func TestS3PathAndSQL(t *testing.T) {
-	cfg := S3Options{Bucket: "b", Prefix: "backup/run01", Region: "cn-shanghai", Endpoint: "oss-cn-shanghai.aliyuncs.com", AuthMode: "static", AccessKey: "ak", SecretKey: "sk", MaxFileSize: "1024MB"}
+	cfg := S3Options{Bucket: "b", Prefix: "backup/run01", Region: "cn-shanghai", Endpoint: "oss-cn-shanghai-internal.aliyuncs.com", ClientEndpoint: "oss-cn-shanghai.aliyuncs.com", AuthMode: "static", AccessKey: "ak", SecretKey: "sk", MaxFileSize: "1024MB"}
 	store := &objectStore{options: cfg}
 	prefix := store.partitionPrefix("source_db", "target_db", "tbl", "p202601")
 	if prefix != "backup/run01/source_db/target_db/tbl/p202601/" {
 		t.Fatal(prefix)
 	}
 	backup := outfileSQL("db", "tbl", "p202601", store.uri(prefix), []string{"id", "dt"}, cfg)
-	if !strings.Contains(backup, "PARTITION(`p202601`)") || !strings.Contains(backup, `"s3.secret_key" = "sk"`) {
+	if !strings.Contains(backup, "PARTITION(`p202601`)") || !strings.Contains(backup, `"s3.secret_key" = "sk"`) || !strings.Contains(backup, `"s3.endpoint" = "oss-cn-shanghai-internal.aliyuncs.com"`) || strings.Contains(backup, "clientEndpoint") {
 		t.Fatal(backup)
 	}
 	importStatement := importSQL("target", "tbl", store.uri(prefix+"part.parquet"), []string{"id", "dt"}, cfg)
