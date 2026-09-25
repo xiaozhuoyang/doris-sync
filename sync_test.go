@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,6 +86,21 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 	if stat.Mode().Perm() != 0o600 {
 		t.Fatalf("state permissions: %v", stat.Mode().Perm())
+	}
+}
+
+func TestStateWriteFailureIsFatal(t *testing.T) {
+	state, err := openState(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := stateKey("src", "dst", "events", "p1")
+	state.Partitions[key] = &partitionState{SourceIdentity: "1:2"}
+	if err := state.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.savePartition(key); !errors.Is(err, errStatePersistence) {
+		t.Fatalf("expected fatal persistence error, got %v", err)
 	}
 }
 

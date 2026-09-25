@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,15 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+var errStatePersistence = errors.New("state persistence failed")
+
+func persistenceError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", errStatePersistence, err)
+}
 
 type partitionState struct {
 	SourceIdentity   string      `json:"sourceIdentity"`
@@ -142,15 +152,15 @@ func (s *syncState) close() error { return s.db.Close() }
 func (s *syncState) saveMetadata() error {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return persistenceError(err)
 	}
 	defer tx.Rollback()
 	for key, value := range map[string]string{"mode": s.Mode, "time_field": s.TimeField} {
 		if _, err := tx.Exec("INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, value); err != nil {
-			return err
+			return persistenceError(err)
 		}
 	}
-	return tx.Commit()
+	return persistenceError(tx.Commit())
 }
 
 func (s *syncState) saveTable(key string) error {
@@ -159,7 +169,7 @@ func (s *syncState) saveTable(key string) error {
 		return err
 	}
 	_, err = s.db.Exec("INSERT INTO table_state(source_db, target_db, table_name, schema_hash) VALUES(?, ?, ?, ?) ON CONFLICT(source_db, target_db, table_name) DO UPDATE SET schema_hash=excluded.schema_hash", parts[0], parts[1], parts[2], s.Tables[key])
-	return err
+	return persistenceError(err)
 }
 
 func (s *syncState) savePartition(key string) error {
@@ -192,7 +202,7 @@ func (s *syncState) savePartition(key string) error {
 		parts[0], parts[1], parts[2], parts[3],
 		entry.SourceIdentity, entry.BackupIdentity, entry.ImportedIdentity, entry.Watermark,
 		entry.BackupReady, entry.ImportInProgress, entry.UpdatedAt.Format(time.RFC3339Nano), string(raw))
-	return err
+	return persistenceError(err)
 }
 
 func stateKey(sourceDB, targetDB, table, partition string) string {

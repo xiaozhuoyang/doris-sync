@@ -124,6 +124,9 @@ func run(configFile string, once bool, checkInterval, syncMode, timeField string
 		}
 		if cycleErr != nil {
 			logger.Printf("CYCLE_ERROR error=%q", cycleErr)
+			if errors.Is(cycleErr, errStatePersistence) {
+				return cycleErr
+			}
 		}
 		interval, _ := time.ParseDuration(o.Interval)
 		select {
@@ -164,6 +167,9 @@ func (s *syncer) cycle(ctx context.Context) error {
 			if err := s.syncTable(ctx, mapping, table, targetTables, &summary); err != nil {
 				summary.failed++
 				s.logger.Printf("TABLE_FAILED database=%s table=%s error=%q", mapping.Source, table, err)
+				if errors.Is(err, errStatePersistence) {
+					return err
+				}
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
@@ -328,6 +334,9 @@ func (s *syncer) syncTable(ctx context.Context, pair DatabasePair, table string,
 		previousCheck := s.nextVersionCheck
 		if err := s.maybeScanCompleted(ctx); err != nil {
 			s.logger.Printf("VERSION_CHECK_FAILED error=%q", err)
+			if errors.Is(err, errStatePersistence) {
+				return err
+			}
 		}
 		if !previousCheck.Equal(s.nextVersionCheck) {
 			latestParts, err := s.source.partitions(ctx, pair.Source, table)
@@ -341,6 +350,9 @@ func (s *syncer) syncTable(ctx context.Context, pair DatabasePair, table string,
 			part = current
 		}
 		if err := s.syncPartitionByMode(ctx, pair, table, part, columnNames, ddl, summary); err != nil {
+			if errors.Is(err, errStatePersistence) {
+				return err
+			}
 			partitionErrors = append(partitionErrors, fmt.Errorf("partition %s: %w", part.Name, err))
 			s.logger.Printf("PARTITION_FAILED database=%s table=%s partition=%s error=%q", pair.Source, table, part.Name, err)
 			continue
