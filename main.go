@@ -159,11 +159,26 @@ func (s *syncer) cycle(ctx context.Context) error {
 		for _, table := range targetNames {
 			targetTables[table] = true
 		}
+		readyTables := make([]string, 0, len(sourceTables))
 		for _, table := range sourceTables {
 			if !s.options.allowsTable(table) {
 				continue
 			}
 			summary.tables++
+			ready, err := s.ensureTargetTable(ctx, mapping, table, targetTables, &summary)
+			if err != nil {
+				summary.failed++
+				s.logger.Printf("TABLE_FAILED database=%s table=%s error=%q", mapping.Source, table, err)
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				continue
+			}
+			if ready {
+				readyTables = append(readyTables, table)
+			}
+		}
+		for _, table := range readyTables {
 			if err := s.syncTable(ctx, mapping, table, targetTables, &summary); err != nil {
 				summary.failed++
 				s.logger.Printf("TABLE_FAILED database=%s table=%s error=%q", mapping.Source, table, err)
@@ -181,6 +196,35 @@ func (s *syncer) cycle(ctx context.Context) error {
 		return fmt.Errorf("%d tables failed", summary.failed)
 	}
 	return nil
+}
+
+func (s *syncer) ensureTargetTable(ctx context.Context, pair DatabasePair, table string, targetTables map[string]bool, summary *stats) (bool, error) {
+	ddl, err := s.source.createTableSQL(ctx, pair.Source, table)
+	if isAsyncView(err) {
+		summary.skipped++
+		s.logger.Printf("SKIP_TABLE database=%s table=%s reason=async_materialized_view", pair.Source, table)
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !createPrefix.MatchString(ddl) {
+		summary.skipped++
+		s.logger.Printf("SKIP_TABLE database=%s table=%s reason=non_olap_table", pair.Source, table)
+		return false, nil
+	}
+	if !targetTables[table] {
+		createSQL, err := targetDDL(ddl, pair.Target, table)
+		if err != nil {
+			return false, err
+		}
+		if err := s.target.exec(ctx, createSQL); err != nil {
+			return false, fmt.Errorf("create target table: %w", err)
+		}
+		targetTables[table] = true
+		s.logger.Printf("CREATE_TABLE database=%s table=%s", pair.Target, table)
+	}
+	return true, nil
 }
 
 func (s *syncer) maybeScanCompleted(ctx context.Context) error {
