@@ -39,14 +39,16 @@ type S3Options struct {
 }
 
 type Options struct {
-	Source        Endpoint       `json:"source"`
-	Target        Endpoint       `json:"target"`
-	Databases     []DatabasePair `json:"databases"`
-	S3            S3Options      `json:"s3"`
-	StateFile     string         `json:"stateFile"`
-	IncludeTables string         `json:"includeTables"`
-	ExcludeTables string         `json:"excludeTables"`
-	Interval      string         `json:"interval"`
+	Source            Endpoint       `json:"source"`
+	Target            Endpoint       `json:"target"`
+	Databases         []DatabasePair `json:"databases"`
+	S3                S3Options      `json:"s3"`
+	StateFile         string         `json:"stateFile"`
+	IncludeTables     string         `json:"includeTables"`
+	ExcludeTables     string         `json:"excludeTables"`
+	IncludePartitions string         `json:"includePartitions"`
+	MetadataTimeout   string         `json:"metadataTimeout"`
+	Interval          string         `json:"interval"`
 }
 
 func loadOptions(path string) (Options, error) {
@@ -72,6 +74,9 @@ func loadOptions(path string) (Options, error) {
 	}
 	if o.Interval == "" {
 		o.Interval = "1h"
+	}
+	if o.MetadataTimeout == "" {
+		o.MetadataTimeout = "10m"
 	}
 	if o.S3.MaxFileSize == "" {
 		o.S3.MaxFileSize = "1024MB"
@@ -119,11 +124,19 @@ func loadOptions(path string) (Options, error) {
 			return o, err
 		}
 	}
+	if o.IncludePartitions != "" {
+		if _, err := regexp.Compile(o.IncludePartitions); err != nil {
+			return o, fmt.Errorf("includePartitions: %w", err)
+		}
+	}
 	if o.Interval != "" {
 		d, err := time.ParseDuration(o.Interval)
 		if err != nil || d < time.Minute {
 			return o, errors.New("interval must be a duration of at least 1m")
 		}
+	}
+	if d, err := time.ParseDuration(o.MetadataTimeout); err != nil || d < time.Minute {
+		return o, errors.New("metadataTimeout must be a duration of at least 1m")
 	}
 	return o, nil
 }
@@ -145,4 +158,8 @@ func (o Options) allowsTable(name string) bool {
 		return false
 	}
 	return o.ExcludeTables == "" || !regexp.MustCompile(o.ExcludeTables).MatchString(name)
+}
+
+func (o Options) allowsPartition(name string) bool {
+	return o.IncludePartitions == "" || regexp.MustCompile(o.IncludePartitions).MatchString(name)
 }

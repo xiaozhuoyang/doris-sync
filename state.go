@@ -25,6 +25,7 @@ func persistenceError(err error) error {
 type partitionState struct {
 	SourceIdentity   string      `json:"sourceIdentity"`
 	BackupIdentity   string      `json:"backupIdentity,omitempty"`
+	BackupPrefix     string      `json:"backupPrefix,omitempty"`
 	ImportedIdentity string      `json:"importedIdentity,omitempty"`
 	Objects          []string    `json:"objects,omitempty"`
 	BackupReady      bool        `json:"backupReady"`
@@ -50,6 +51,7 @@ type deltaState struct {
 
 type syncState struct {
 	Tables     map[string]string
+	Inventory  map[string]int
 	Partitions map[string]*partitionState
 	Mode       string
 	TimeField  string
@@ -72,6 +74,7 @@ func openState(path string) (*syncState, error) {
 		"PRAGMA busy_timeout=5000",
 		"CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
 		"CREATE TABLE IF NOT EXISTS table_state (source_db TEXT NOT NULL, target_db TEXT NOT NULL, table_name TEXT NOT NULL, schema_hash TEXT NOT NULL, PRIMARY KEY(source_db, target_db, table_name))",
+		"CREATE TABLE IF NOT EXISTS table_inventory (source_db TEXT NOT NULL, target_db TEXT NOT NULL, table_name TEXT NOT NULL, partition_count INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(source_db, target_db, table_name))",
 		"CREATE TABLE IF NOT EXISTS partition_state (source_db TEXT NOT NULL, target_db TEXT NOT NULL, table_name TEXT NOT NULL, partition_name TEXT NOT NULL, source_identity TEXT NOT NULL, backup_identity TEXT NOT NULL, imported_identity TEXT NOT NULL, watermark TEXT NOT NULL, backup_ready INTEGER NOT NULL, import_in_progress INTEGER NOT NULL, updated_at TEXT NOT NULL, state_json TEXT NOT NULL, PRIMARY KEY(source_db, target_db, table_name, partition_name))",
 	} {
 		if _, err := db.Exec(statement); err != nil {
@@ -81,7 +84,7 @@ func openState(path string) (*syncState, error) {
 	if err := os.Chmod(path, 0o600); err != nil {
 		return fail(err)
 	}
-	s := &syncState{Tables: map[string]string{}, Partitions: map[string]*partitionState{}, db: db}
+	s := &syncState{Tables: map[string]string{}, Inventory: map[string]int{}, Partitions: map[string]*partitionState{}, db: db}
 	rows, err := db.Query("SELECT source_db, target_db, table_name, schema_hash FROM table_state")
 	if err != nil {
 		return fail(err)
@@ -93,6 +96,24 @@ func openState(path string) (*syncState, error) {
 			return fail(err)
 		}
 		s.Tables[stateKey(sourceDB, targetDB, table, "")] = hash
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fail(err)
+	}
+	rows.Close()
+	rows, err = db.Query("SELECT source_db, target_db, table_name, partition_count FROM table_inventory")
+	if err != nil {
+		return fail(err)
+	}
+	for rows.Next() {
+		var sourceDB, targetDB, table string
+		var count int
+		if err := rows.Scan(&sourceDB, &targetDB, &table, &count); err != nil {
+			rows.Close()
+			return fail(err)
+		}
+		s.Inventory[stateKey(sourceDB, targetDB, table, "")] = count
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -170,6 +191,19 @@ func (s *syncState) saveTable(key string) error {
 	}
 	_, err = s.db.Exec("INSERT INTO table_state(source_db, target_db, table_name, schema_hash) VALUES(?, ?, ?, ?) ON CONFLICT(source_db, target_db, table_name) DO UPDATE SET schema_hash=excluded.schema_hash", parts[0], parts[1], parts[2], s.Tables[key])
 	return persistenceError(err)
+}
+
+func (s *syncState) saveInventory(key string, count int) error {
+	parts, err := splitStateKey(key)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec("INSERT INTO table_inventory(source_db, target_db, table_name, partition_count, updated_at) VALUES(?, ?, ?, ?, ?) ON CONFLICT(source_db, target_db, table_name) DO UPDATE SET partition_count=excluded.partition_count, updated_at=excluded.updated_at", parts[0], parts[1], parts[2], count, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return persistenceError(err)
+	}
+	s.Inventory[key] = count
+	return nil
 }
 
 func (s *syncState) savePartition(key string) error {

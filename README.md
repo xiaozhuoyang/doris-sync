@@ -14,16 +14,16 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/doris-partition-sync-linu
 Build a self-contained Linux amd64 package on macOS or Linux:
 
 ```bash
-sh deploy/build-package.sh v1.0.2
+sh deploy/build-package.sh v1.0.3
 ```
 
-The resulting `dist/doris-partition-sync-v1.0.2-linux-amd64.tar.gz` contains the static executable, example config, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
+The resulting `dist/doris-partition-sync-v1.0.3-linux-amd64.tar.gz` contains the static executable, example config, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
 
 On the Linux host, extract the package, prepare real config and credentials, then install and start the service:
 
 ```bash
-tar -xzf doris-partition-sync-v1.0.2-linux-amd64.tar.gz
-cd doris-partition-sync-v1.0.2-linux-amd64
+tar -xzf doris-partition-sync-v1.0.3-linux-amd64.tar.gz
+cd doris-partition-sync-v1.0.3-linux-amd64
 cp partition-sync.example.json partition-sync.json
 cp partition-sync.env.example partition-sync.env
 # Edit partition-sync.json and partition-sync.env for your source, target, bucket, and credentials.
@@ -65,6 +65,17 @@ For continuous checks, omit `--once`. Two modes are available:
 
 The interval defaults to `1h`, can be set in the config as `interval`, and can be overridden with `--check-interval`. Every partition joins version checks as soon as its first import succeeds; other partitions can still be doing their initial sync. `--once` runs one complete scan. `stateFile` is a SQLite database (default `partition-sync-state.db`) and must be on persistent local storage. Only one process may use it at a time. Mode and time field are recorded in SQLite and cannot be changed on restart; use a separate state database and dedicated bucket prefix to start a different mode. `source.cluster` and `target.cluster` can select different SelectDB compute clusters; `session` contains `SET` assignments such as `query_timeout=7200`.
 
+Metadata reads (`SHOW TABLES`, `SHOW CREATE TABLE`, `DESC`, `SHOW PARTITIONS`) have a configurable `metadataTimeout`, defaulting to `10m`, and are retried up to three times on timeout. Long-running OUTFILE and import statements retain their separate connection timeout. For a one-partition test, set `includeTables` and `includePartitions` to anchored regular expressions; clear both filters for whole-database sync.
+
+Read a live SQLite checkpoint without connecting to SelectDB or stopping the sync process:
+
+```bash
+./dist/doris-partition-sync-linux-amd64 --status --state-file /var/lib/doris-partition-sync/partition-sync-state.db
+./dist/doris-partition-sync-linux-amd64 --status --state-file /var/lib/doris-partition-sync/partition-sync-state.db | jq '{progressPercent, tables, incrementalSyncingPartitions}'
+```
+
+`currentPartitions` counts partitions whose recorded source and imported versions match. `incrementalMonitoring` counts imported partitions waiting for version changes; `incrementalSyncingPartitions` lists imported partitions with a pending version change or import checkpoint. `activePartitions` also includes first-time backup/import checkpoints. The report reflects persisted checkpoints rather than an instantaneous source version check. `knownTotalPartitions` comes from the latest table inventory and is populated when each table is scanned; if a table lacks inventory, `inventoryKnown` is false and the reported percentage is incomplete.
+
 For AWS IAM, set `authMode` to `iam`, remove `accessKey` and `secretKey`, set `region` and optionally `roleArn`. The local process uses the AWS default credential chain or assumes `roleArn`; the FE uses `s3.role_arn` when it is configured. The FE/BE nodes must be authorized to read and write the bucket independently of the tool process.
 
 If the SelectDB nodes use a private OSS/S3 endpoint but the sync process runs outside that network, set `s3.endpoint` to the private endpoint and `s3.clientEndpoint` to the public endpoint. OUTFILE and S3 TVF use `endpoint`; local object listing and cleanup use `clientEndpoint` (or `endpoint` when omitted).
@@ -73,12 +84,12 @@ If the SelectDB nodes use a private OSS/S3 endpoint but the sync process runs ou
 
 1. `SHOW TABLES` and `SHOW CREATE TABLE` discover the source. Async materialized views are skipped. All missing target tables are created before any partition data is copied, including empty tables. `DESC` and `SHOW PARTITIONS` validate and read each table during data sync. For automatic partitioning, source partition instances are omitted from the target DDL so the target creates partitions as data arrives.
 2. Partitions are sorted by range start (or name where no date range is available) and processed sequentially, oldest first.
-3. Each partition uses `s3://bucket/prefix/source_db/target_db/table/partition/`, so separate target mappings never share backup objects. SQLite stores partition ID and `VisibleVersion`. Initial sync exports the full partition. The target partition is matched by the lower and upper bounds in `SHOW PARTITIONS.Range` when available, falling back to `PartitionName` if range bounds cannot be parsed.
+3. Each partition uses `s3://bucket/prefix/source_db/target_db/table/partition/`; each full backup attempt writes only to its own `full/<random-id>/` child. A stale or canceled OUTFILE can therefore never contaminate the next import. SQLite stores the chosen child prefix, partition ID and `VisibleVersion`. Initial sync exports the full partition. The target partition is matched by the lower and upper bounds in `SHOW PARTITIONS.Range` when available, falling back to `PartitionName` if range bounds cannot be parsed.
 4. In `overwrite` mode, a changed partition clears its backup prefix, reruns full OUTFILE, then atomically replaces only the matching target partition with one `INSERT OVERWRITE TABLE ... PARTITION(target_name)`. It does not truncate first. A missing target partition is restored using auto partitioning.
 5. In `time-window` mode, initial full sync also records `MAX(time_field)` per partition. When its version changes, the tool exports `(previous_watermark, current_MAX]` to `.../partition/incremental/<batch-label>/` and imports the batch with a labeled INSERT. An interrupted import checks `SHOW LOAD` before retrying. If the maximum time does not advance, the tool falls back to full partition overwrite. A missing target partition is also fully restored.
 6. State is written atomically after backup and import. A failed partition is logged, and the tool continues to other partitions. Unchanged partitions are skipped on later scans.
 
-`BACKUP_START`, `BACKUP_DONE`, `OVERWRITE_START`, `IMPORT_DONE`, `DELTA_BACKUP_START`, `DELTA_IMPORT_START`, `DELTA_IMPORT_DONE`, `PARTITION_FAILED`, and `SUMMARY` are printed to stdout. SQLite stores mode, table schema hashes, partition versions, time watermarks where applicable, and object names; it does not contain passwords or access keys. Each table or partition checkpoint updates one database row. The SQLite database uses WAL journaling; back it up with SQLite's backup API or `sqlite3 partition-sync-state.db '.backup backup-state.db'`, not by copying only the live `.db` file.
+`BACKUP_START`, `BACKUP_DONE`, `IMPORT_START`, `OVERWRITE_START`, `IMPORT_DONE`, `DELTA_BACKUP_START`, `DELTA_IMPORT_START`, `DELTA_IMPORT_DONE`, `PARTITION_FAILED`, and `SUMMARY` are printed to stdout. SQLite stores mode, table schema hashes, partition versions, time watermarks where applicable, and object names; it does not contain passwords or access keys. Each table or partition checkpoint updates one database row. The SQLite database uses WAL journaling; back it up with SQLite's backup API or `sqlite3 partition-sync-state.db '.backup backup-state.db'`, not by copying only the live `.db` file.
 
 Inspect saved versions directly:
 

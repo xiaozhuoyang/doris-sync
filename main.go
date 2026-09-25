@@ -33,12 +33,21 @@ type stats struct{ tables, skipped, backedUp, imported, unchanged, failed int }
 
 func main() {
 	configFile := flag.String("config", "partition-sync.json", "configuration file")
+	status := flag.Bool("status", false, "print the current SQLite checkpoint as JSON without connecting to SelectDB")
+	statusStateFile := flag.String("state-file", "partition-sync-state.db", "SQLite state file for --status")
 	once := flag.Bool("once", false, "run one synchronization cycle even when interval is configured")
 	checkInterval := flag.String("check-interval", "", "visible version check interval (default 1h)")
 	syncMode := flag.String("sync-mode", "overwrite", "incremental mode: overwrite or time-window")
 	timeField := flag.String("time-field", "", "DATE/DATETIME column required for time-window mode")
 	flag.Parse()
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
+	if *status {
+		if err := printStatus(*statusStateFile, os.Stdout); err != nil {
+			logger.Printf("FATAL error=%q", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(*configFile, *once, *checkInterval, *syncMode, *timeField, logger); err != nil {
 		logger.Printf("FATAL error=%q", err)
 		os.Exit(1)
@@ -59,6 +68,7 @@ func run(configFile string, once bool, checkInterval, syncMode, timeField string
 	if err != nil {
 		return err
 	}
+	metadataTimeout, _ := time.ParseDuration(o.MetadataTimeout)
 	if checkInterval != "" {
 		d, err := time.ParseDuration(checkInterval)
 		if err != nil || d < time.Minute {
@@ -83,12 +93,12 @@ func run(configFile string, once bool, checkInterval, syncMode, timeField string
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	source, err := openDatabase(ctx, o.Source)
+	source, err := openDatabase(ctx, o.Source, metadataTimeout)
 	if err != nil {
 		return fmt.Errorf("connect source: %w", err)
 	}
 	defer source.close()
-	target, err := openDatabase(ctx, o.Target)
+	target, err := openDatabase(ctx, o.Target, metadataTimeout)
 	if err != nil {
 		return fmt.Errorf("connect target: %w", err)
 	}
@@ -224,6 +234,13 @@ func (s *syncer) ensureTargetTable(ctx context.Context, pair DatabasePair, table
 		targetTables[table] = true
 		s.logger.Printf("CREATE_TABLE database=%s table=%s", pair.Target, table)
 	}
+	parts, err := s.source.partitions(ctx, pair.Source, table)
+	if err != nil {
+		return false, err
+	}
+	if err := s.state.saveInventory(stateKey(pair.Source, pair.Target, table, ""), len(parts)); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -239,7 +256,7 @@ func (s *syncer) maybeScanCompleted(ctx context.Context) error {
 		byTable := map[string]bool{}
 		for key, entry := range s.state.Partitions {
 			parts := strings.Split(key, "\x00")
-			if len(parts) == 4 && parts[0] == pair.Source && parts[1] == pair.Target && entry != nil && entry.ImportedIdentity != "" && s.options.allowsTable(parts[2]) {
+			if len(parts) == 4 && parts[0] == pair.Source && parts[1] == pair.Target && entry != nil && entry.ImportedIdentity != "" && s.options.allowsTable(parts[2]) && s.options.allowsPartition(parts[3]) {
 				byTable[parts[2]] = true
 			}
 		}
@@ -259,6 +276,9 @@ func (s *syncer) maybeScanCompleted(ctx context.Context) error {
 			}
 			var candidates []partition
 			for _, part := range parts {
+				if !s.options.allowsPartition(part.Name) {
+					continue
+				}
 				entry := s.state.Partitions[stateKey(pair.Source, pair.Target, table, part.Name)]
 				if entry != nil && entry.ImportedIdentity != "" {
 					checked++
@@ -331,6 +351,13 @@ func (s *syncer) syncTable(ctx context.Context, pair DatabasePair, table string,
 	if err != nil {
 		return err
 	}
+	filtered := parts[:0]
+	for _, part := range parts {
+		if s.options.allowsPartition(part.Name) {
+			filtered = append(filtered, part)
+		}
+	}
+	parts = filtered
 	columnJSON, _ := json.Marshal(columns)
 	hash := sha256.Sum256(columnJSON)
 	schemaHash := hex.EncodeToString(hash[:])
@@ -425,7 +452,7 @@ func (s *syncer) syncPartition(ctx context.Context, pair DatabasePair, table str
 		entry = &partitionState{}
 		s.state.Partitions[key] = entry
 	}
-	if entry.BackupReady && entry.ImportedIdentity == identity && !entry.ImportInProgress {
+	if entry.BackupReady && entry.BackupPrefix != "" && entry.ImportedIdentity == identity && !entry.ImportInProgress {
 		if len(entry.Objects) == 0 {
 			summary.unchanged++
 			return nil
@@ -447,17 +474,25 @@ func (s *syncer) syncPartition(ctx context.Context, pair DatabasePair, table str
 			return err
 		}
 	}
-	prefix := s.store.partitionPrefix(pair.Source, pair.Target, table, part.Name)
-	if entry.BackupIdentity != identity || !entry.BackupReady {
+	partitionPrefix := s.store.partitionPrefix(pair.Source, pair.Target, table, part.Name)
+	prefix := entry.BackupPrefix
+	if entry.BackupIdentity != identity || !entry.BackupReady || prefix == "" {
+		var err error
+		prefix, err = backupGenerationPrefix(partitionPrefix)
+		if err != nil {
+			return err
+		}
 		entry.SourceIdentity = identity
 		entry.BackupReady = false
 		entry.BackupIdentity = ""
+		entry.BackupPrefix = prefix
 		entry.Objects = nil
+		entry.ImportInProgress = false
 		entry.UpdatedAt = time.Now()
 		if err := s.state.savePartition(key); err != nil {
 			return err
 		}
-		if err := s.store.clear(ctx, prefix); err != nil {
+		if err := s.store.clear(ctx, partitionPrefix); err != nil {
 			return fmt.Errorf("clear backup prefix: %w", err)
 		}
 		s.logger.Printf("BACKUP_START database=%s table=%s partition=%s visible_version=%s uri=%s", pair.Source, table, part.Name, part.Version, s.store.uri(prefix))
@@ -531,6 +566,7 @@ func (s *syncer) syncPartition(ctx context.Context, pair DatabasePair, table str
 			return fmt.Errorf("overwrite target partition %s: %w", targetPart.Name, err)
 		}
 	} else if len(entry.Objects) > 0 {
+		s.logger.Printf("IMPORT_START database=%s table=%s partition=%s files=%d", pair.Target, table, part.Name, len(entry.Objects))
 		if err := s.target.exec(ctx, importSQL(pair.Target, table, s.store.uri(prefix)+"*.parquet", columns, s.options.S3)); err != nil {
 			return fmt.Errorf("initial import partition %s: %w", part.Name, err)
 		}

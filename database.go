@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -14,8 +15,9 @@ import (
 )
 
 type database struct {
-	db      *sql.DB
-	options Endpoint
+	db              *sql.DB
+	options         Endpoint
+	metadataTimeout time.Duration
 }
 
 type partition struct {
@@ -27,7 +29,7 @@ type partition struct {
 
 type column struct{ Name, Type string }
 
-func openDatabase(ctx context.Context, o Endpoint) (*database, error) {
+func openDatabase(ctx context.Context, o Endpoint, metadataTimeout time.Duration) (*database, error) {
 	cfg := mysql.NewConfig()
 	cfg.User, cfg.Passwd = o.User, o.Password
 	cfg.Net = "tcp"
@@ -45,7 +47,7 @@ func openDatabase(ctx context.Context, o Endpoint) (*database, error) {
 		db.Close()
 		return nil, err
 	}
-	return &database{db: db, options: o}, nil
+	return &database{db: db, options: o, metadataTimeout: metadataTimeout}, nil
 }
 
 func (d *database) close() { _ = d.db.Close() }
@@ -113,12 +115,26 @@ func (d *database) query(ctx context.Context, statement string) ([]map[string]st
 	return result, err
 }
 
+func (d *database) queryMetadata(ctx context.Context, statement string) ([]map[string]string, error) {
+	var rows []map[string]string
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		queryCtx, cancel := context.WithTimeout(ctx, d.metadataTimeout)
+		rows, err = d.query(queryCtx, statement)
+		cancel()
+		if err == nil || ctx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) {
+			return rows, err
+		}
+	}
+	return nil, fmt.Errorf("metadata query timed out after 3 attempts: %s: %w", statement, err)
+}
+
 func normalizeHeader(s string) string {
 	return strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(s, "_", ""), " ", ""))
 }
 
 func (d *database) tables(ctx context.Context, databaseName string) ([]string, error) {
-	rows, err := d.query(ctx, "SHOW TABLES FROM "+ident(databaseName))
+	rows, err := d.queryMetadata(ctx, "SHOW TABLES FROM "+ident(databaseName))
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +150,7 @@ func (d *database) tables(ctx context.Context, databaseName string) ([]string, e
 }
 
 func (d *database) createTableSQL(ctx context.Context, db, table string) (string, error) {
-	rows, err := d.query(ctx, "SHOW CREATE TABLE "+qtable(db, table))
+	rows, err := d.queryMetadata(ctx, "SHOW CREATE TABLE "+qtable(db, table))
 	if err != nil {
 		return "", err
 	}
@@ -149,7 +165,7 @@ func (d *database) createTableSQL(ctx context.Context, db, table string) (string
 }
 
 func (d *database) columns(ctx context.Context, db, table string) ([]column, error) {
-	rows, err := d.query(ctx, "DESC "+qtable(db, table))
+	rows, err := d.queryMetadata(ctx, "DESC "+qtable(db, table))
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +182,7 @@ func (d *database) columns(ctx context.Context, db, table string) ([]column, err
 }
 
 func (d *database) partitions(ctx context.Context, db, table string) ([]partition, error) {
-	rows, err := d.query(ctx, "SHOW PARTITIONS FROM "+qtable(db, table))
+	rows, err := d.queryMetadata(ctx, "SHOW PARTITIONS FROM "+qtable(db, table))
 	if err != nil {
 		return nil, err
 	}

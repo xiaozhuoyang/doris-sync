@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"sort"
@@ -52,6 +54,14 @@ func openObjectStore(ctx context.Context, o S3Options) (*objectStore, error) {
 func (s *objectStore) partitionPrefix(sourceDB, targetDB, table, partition string) string {
 	root := strings.Trim(s.options.Prefix, "/")
 	return root + "/" + url.PathEscape(sourceDB) + "/" + url.PathEscape(targetDB) + "/" + url.PathEscape(table) + "/" + url.PathEscape(partition) + "/"
+}
+
+func backupGenerationPrefix(partitionPrefix string) (string, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", err
+	}
+	return partitionPrefix + "full/" + hex.EncodeToString(id[:]) + "/", nil
 }
 
 func (s *objectStore) uri(key string) string { return "s3://" + s.options.Bucket + "/" + key }

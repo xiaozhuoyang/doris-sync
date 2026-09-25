@@ -30,5 +30,7 @@
   "stateFile": "./partition-sync-state.db",
   "includeTables": "",
   "excludeTables": "",
+  "includePartitions": "",
+  "metadataTimeout": "10m",
   "interval": "1h"
 }

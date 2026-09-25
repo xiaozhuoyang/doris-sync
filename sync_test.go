@@ -52,6 +52,21 @@ func TestS3PathAndSQL(t *testing.T) {
 	}
 }
 
+func TestBackupGenerationPrefix(t *testing.T) {
+	base := "backup/src/dst/table/partition/"
+	first, err := backupGenerationPrefix(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := backupGenerationPrefix(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second || !strings.HasPrefix(first, base+"full/") || !strings.HasSuffix(first, "/") {
+		t.Fatalf("invalid generation prefixes: %q %q", first, second)
+	}
+}
+
 func TestStateRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	state, err := openState(path)
@@ -60,7 +75,7 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 	key := stateKey("source_db", "target_db", "tbl", "p1")
 	otherKey := stateKey("source_db", "another_target", "tbl", "p1")
-	state.Partitions[key] = &partitionState{SourceIdentity: "123:5", BackupIdentity: "123:5", ImportedIdentity: "123:5", BackupReady: true, Objects: []string{"backup/db/tbl/p1/a.parquet"}}
+	state.Partitions[key] = &partitionState{SourceIdentity: "123:5", BackupIdentity: "123:5", BackupPrefix: "backup/db/tbl/p1/full/generation/", ImportedIdentity: "123:5", BackupReady: true, Objects: []string{"backup/db/tbl/p1/full/generation/a.parquet"}}
 	state.Partitions[otherKey] = &partitionState{SourceIdentity: "123:6", ImportedIdentity: "123:6", BackupReady: true}
 	state.Tables[stateKey("source_db", "target_db", "tbl", "")] = "schema-hash"
 	if err := state.saveTable(stateKey("source_db", "target_db", "tbl", "")); err != nil {
@@ -83,6 +98,9 @@ func TestStateRoundTrip(t *testing.T) {
 	if loaded.Partitions[key].ImportedIdentity != "123:5" {
 		t.Fatal("state did not persist")
 	}
+	if loaded.Partitions[key].BackupPrefix != "backup/db/tbl/p1/full/generation/" {
+		t.Fatal("backup generation did not persist")
+	}
 	if loaded.Tables[stateKey("source_db", "target_db", "tbl", "")] != "schema-hash" {
 		t.Fatal("table state did not persist")
 	}
@@ -102,6 +120,44 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 	if stat.Mode().Perm() != 0o600 {
 		t.Fatalf("state permissions: %v", stat.Mode().Perm())
+	}
+}
+
+func TestStatusWhileStateOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "status.db")
+	state, err := openState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.close()
+	state.Mode = "overwrite"
+	if err := state.saveMetadata(); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.saveInventory(stateKey("src", "dst", "events", ""), 3); err != nil {
+		t.Fatal(err)
+	}
+	states := map[string]*partitionState{
+		"p1": {SourceIdentity: "1:2", ImportedIdentity: "1:2", BackupPrefix: "backup/src/dst/events/p1/full/a/", BackupReady: true},
+		"p2": {SourceIdentity: "2:3", ImportedIdentity: "2:2", BackupPrefix: "backup/src/dst/events/p2/full/b/", BackupReady: true, ImportInProgress: true},
+		"p3": {SourceIdentity: "3:2", BackupPrefix: "backup/src/dst/events/p3/full/c/"},
+	}
+	for name, entry := range states {
+		key := stateKey("src", "dst", "events", name)
+		state.Partitions[key] = entry
+		if err := state.savePartition(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report, err := readStatus(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.KnownTotalPartitions != 3 || report.CurrentPartitions != 1 || report.IncrementalMonitoringCount != 1 || report.IncrementalSyncingCount != 1 || len(report.IncrementalSyncingPartitions) != 1 || report.IncrementalSyncingPartitions[0].Partition != "p2" {
+		t.Fatalf("unexpected status: %+v", report)
+	}
+	if len(report.ActivePartitions) != 2 || report.Tables[0].TotalPartitions != 3 {
+		t.Fatalf("unexpected active/table status: %+v", report)
 	}
 }
 
