@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -64,6 +65,58 @@ func TestBackupGenerationPrefix(t *testing.T) {
 	}
 	if first == second || !strings.HasPrefix(first, base+"full/") || !strings.HasSuffix(first, "/") {
 		t.Fatalf("invalid generation prefixes: %q %q", first, second)
+	}
+}
+
+func TestExactPartitionSelection(t *testing.T) {
+	names, err := parsePartitionNames("p20260901000000, p20260901010000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := Options{Partitions: names}
+	if len(names) != 2 || !o.allowsPartition("p20260901000000") || !o.allowsPartition("p20260901010000") || o.allowsPartition("p20260901020000") {
+		t.Fatalf("unexpected partition selection: %v", names)
+	}
+	for _, input := range []string{"p1,", "p1,p1", " ,p2"} {
+		if _, err := parsePartitionNames(input); err == nil {
+			t.Fatalf("expected invalid partition list %q", input)
+		}
+	}
+	if err := validatePartitionNames([]string{" p1"}); err == nil {
+		t.Fatal("config partition names must not contain surrounding spaces")
+	}
+	regex := Options{IncludePartitions: "^p20260901"}
+	if !regex.allowsPartition("p20260901000000") || regex.allowsPartition("p20260902000000") {
+		t.Fatal("existing regex partition selection regressed")
+	}
+}
+
+func TestPartitionListConfig(t *testing.T) {
+	cfg := Options{
+		Source:     Endpoint{Host: "source", User: "root", Password: "test"},
+		Target:     Endpoint{Host: "target", User: "root", Password: "test"},
+		Databases:  []DatabasePair{{Source: "src", Target: "dst"}},
+		S3:         S3Options{Bucket: "test", Prefix: "backup/run", Region: "cn-shanghai", AuthMode: "static", AccessKey: "test", SecretKey: "test"},
+		Partitions: []string{"p1", "p2"},
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	load := func() (Options, error) {
+		data, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return loadOptions(path)
+	}
+	loaded, err := load()
+	if err != nil || !loaded.allowsPartition("p1") || loaded.allowsPartition("p3") {
+		t.Fatalf("unexpected config selection: %+v error=%v", loaded.Partitions, err)
+	}
+	cfg.IncludePartitions = "^p"
+	if _, err := load(); err == nil {
+		t.Fatal("exact list and regex must be mutually exclusive")
 	}
 }
 

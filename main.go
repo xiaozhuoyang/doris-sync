@@ -27,6 +27,7 @@ type syncer struct {
 	state            *syncState
 	logger           *log.Logger
 	nextVersionCheck time.Time
+	seenPartitions   map[string]bool
 }
 
 type stats struct{ tables, skipped, backedUp, imported, unchanged, failed int }
@@ -39,6 +40,7 @@ func main() {
 	checkInterval := flag.String("check-interval", "", "visible version check interval (default 1h)")
 	syncMode := flag.String("sync-mode", "overwrite", "incremental mode: overwrite or time-window")
 	timeField := flag.String("time-field", "", "DATE/DATETIME column required for time-window mode")
+	partitions := flag.String("partitions", "", "comma-separated exact source partition names; overrides config partition filters")
 	flag.Parse()
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
 	if *status {
@@ -48,13 +50,13 @@ func main() {
 		}
 		return
 	}
-	if err := run(*configFile, *once, *checkInterval, *syncMode, *timeField, logger); err != nil {
+	if err := run(*configFile, *once, *checkInterval, *syncMode, *timeField, *partitions, logger); err != nil {
 		logger.Printf("FATAL error=%q", err)
 		os.Exit(1)
 	}
 }
 
-func run(configFile string, once bool, checkInterval, syncMode, timeField string, logger *log.Logger) error {
+func run(configFile string, once bool, checkInterval, syncMode, timeField, partitions string, logger *log.Logger) error {
 	if syncMode != "overwrite" && syncMode != "time-window" {
 		return fmt.Errorf("--sync-mode must be overwrite or time-window")
 	}
@@ -67,6 +69,14 @@ func run(configFile string, once bool, checkInterval, syncMode, timeField string
 	o, err := loadOptions(configFile)
 	if err != nil {
 		return err
+	}
+	if partitions != "" {
+		names, err := parsePartitionNames(partitions)
+		if err != nil {
+			return err
+		}
+		o.Partitions = names
+		o.IncludePartitions = ""
 	}
 	metadataTimeout, _ := time.ParseDuration(o.MetadataTimeout)
 	if checkInterval != "" {
@@ -122,7 +132,7 @@ func run(configFile string, once bool, checkInterval, syncMode, timeField string
 	if err := state.saveMetadata(); err != nil {
 		return err
 	}
-	s := &syncer{options: o, source: source, target: target, store: store, state: state, logger: logger}
+	s := &syncer{options: o, source: source, target: target, store: store, state: state, logger: logger, seenPartitions: make(map[string]bool)}
 	if o.Interval != "" {
 		interval, _ := time.ParseDuration(o.Interval)
 		s.nextVersionCheck = time.Now().Add(interval)
@@ -149,6 +159,13 @@ func run(configFile string, once bool, checkInterval, syncMode, timeField string
 
 func (s *syncer) cycle(ctx context.Context) error {
 	var summary stats
+	type tablePlan struct {
+		mapping      DatabasePair
+		targetTables map[string]bool
+		tables       []string
+	}
+	var plans []tablePlan
+	clear(s.seenPartitions)
 	s.logger.Printf("CYCLE_START sync_mode=%s", s.state.Mode)
 	for _, mapping := range s.options.Databases {
 		if err := ctx.Err(); err != nil {
@@ -188,10 +205,22 @@ func (s *syncer) cycle(ctx context.Context) error {
 				readyTables = append(readyTables, table)
 			}
 		}
-		for _, table := range readyTables {
-			if err := s.syncTable(ctx, mapping, table, targetTables, &summary); err != nil {
+		plans = append(plans, tablePlan{mapping: mapping, targetTables: targetTables, tables: readyTables})
+	}
+	var missing []string
+	for _, name := range s.options.Partitions {
+		if !s.seenPartitions[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("specified source partitions not found in selected tables: %s", strings.Join(missing, ", "))
+	}
+	for _, plan := range plans {
+		for _, table := range plan.tables {
+			if err := s.syncTable(ctx, plan.mapping, table, plan.targetTables, &summary); err != nil {
 				summary.failed++
-				s.logger.Printf("TABLE_FAILED database=%s table=%s error=%q", mapping.Source, table, err)
+				s.logger.Printf("TABLE_FAILED database=%s table=%s error=%q", plan.mapping.Source, table, err)
 				if errors.Is(err, errStatePersistence) {
 					return err
 				}
@@ -237,6 +266,9 @@ func (s *syncer) ensureTargetTable(ctx context.Context, pair DatabasePair, table
 	parts, err := s.source.partitions(ctx, pair.Source, table)
 	if err != nil {
 		return false, err
+	}
+	for _, part := range parts {
+		s.seenPartitions[part.Name] = true
 	}
 	if err := s.state.saveInventory(stateKey(pair.Source, pair.Target, table, ""), len(parts)); err != nil {
 		return false, err

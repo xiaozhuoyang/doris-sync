@@ -14,16 +14,16 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/doris-partition-sync-linu
 Build a self-contained Linux amd64 package on macOS or Linux:
 
 ```bash
-sh deploy/build-package.sh v1.0.3
+sh deploy/build-package.sh v1.0.4
 ```
 
-The resulting `dist/doris-partition-sync-v1.0.3-linux-amd64.tar.gz` contains the static executable, example config, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
+The resulting `dist/doris-partition-sync-v1.0.4-linux-amd64.tar.gz` contains the static executable, example config, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
 
 On the Linux host, extract the package, prepare real config and credentials, then install and start the service:
 
 ```bash
-tar -xzf doris-partition-sync-v1.0.3-linux-amd64.tar.gz
-cd doris-partition-sync-v1.0.3-linux-amd64
+tar -xzf doris-partition-sync-v1.0.4-linux-amd64.tar.gz
+cd doris-partition-sync-v1.0.4-linux-amd64
 cp partition-sync.example.json partition-sync.json
 cp partition-sync.env.example partition-sync.env
 # Edit partition-sync.json and partition-sync.env for your source, target, bucket, and credentials.
@@ -66,6 +66,15 @@ For continuous checks, omit `--once`. Two modes are available:
 The interval defaults to `1h`, can be set in the config as `interval`, and can be overridden with `--check-interval`. Every partition joins version checks as soon as its first import succeeds; other partitions can still be doing their initial sync. `--once` runs one complete scan. `stateFile` is a SQLite database (default `partition-sync-state.db`) and must be on persistent local storage. Only one process may use it at a time. Mode and time field are recorded in SQLite and cannot be changed on restart; use a separate state database and dedicated bucket prefix to start a different mode. `source.cluster` and `target.cluster` can select different SelectDB compute clusters; `session` contains `SET` assignments such as `query_timeout=7200`.
 
 Metadata reads (`SHOW TABLES`, `SHOW CREATE TABLE`, `DESC`, `SHOW PARTITIONS`) have a configurable `metadataTimeout`, defaulting to `10m`, and are retried up to three times on timeout. Long-running OUTFILE and import statements retain their separate connection timeout. For a one-partition test, set `includeTables` and `includePartitions` to anchored regular expressions; clear both filters for whole-database sync.
+
+To select exact source partition names, set `"partitions": ["p20260901000000", "p20260901010000"]` in the config, or override the config selection at startup:
+
+```bash
+./doris-partition-sync --config ./partition-sync.json --sync-mode overwrite --once \
+  --partitions p20260901000000,p20260901010000
+```
+
+`--partitions` replaces either config partition filter for that run. In the config, `partitions` and the existing `includePartitions` regex are mutually exclusive. Both initial sync and subsequent visible-version checks honor the selection, while partitions still run oldest first. Exact names not found in any selected source table cause an error instead of a silent no-op. `includeTables` can narrow the selection to one table. Remove the partition filter for whole-database sync. The status command's progress denominator remains the complete partition inventory, not only the selected subset.
 
 Read a live SQLite checkpoint without connecting to SelectDB or stopping the sync process:
 

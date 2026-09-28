@@ -47,6 +47,7 @@ type Options struct {
 	IncludeTables     string         `json:"includeTables"`
 	ExcludeTables     string         `json:"excludeTables"`
 	IncludePartitions string         `json:"includePartitions"`
+	Partitions        []string       `json:"partitions"`
 	MetadataTimeout   string         `json:"metadataTimeout"`
 	Interval          string         `json:"interval"`
 }
@@ -129,6 +130,14 @@ func loadOptions(path string) (Options, error) {
 			return o, fmt.Errorf("includePartitions: %w", err)
 		}
 	}
+	if len(o.Partitions) > 0 {
+		if o.IncludePartitions != "" {
+			return o, errors.New("partitions and includePartitions cannot both be set")
+		}
+		if err := validatePartitionNames(o.Partitions); err != nil {
+			return o, err
+		}
+	}
 	if o.Interval != "" {
 		d, err := time.ParseDuration(o.Interval)
 		if err != nil || d < time.Minute {
@@ -161,5 +170,41 @@ func (o Options) allowsTable(name string) bool {
 }
 
 func (o Options) allowsPartition(name string) bool {
+	if len(o.Partitions) > 0 {
+		for _, part := range o.Partitions {
+			if part == name {
+				return true
+			}
+		}
+		return false
+	}
 	return o.IncludePartitions == "" || regexp.MustCompile(o.IncludePartitions).MatchString(name)
+}
+
+func parsePartitionNames(raw string) ([]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	names := strings.Split(raw, ",")
+	for i := range names {
+		names[i] = strings.TrimSpace(names[i])
+	}
+	if err := validatePartitionNames(names); err != nil {
+		return nil, err
+	}
+	return names, nil
+}
+
+func validatePartitionNames(names []string) error {
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if name == "" || strings.TrimSpace(name) != name {
+			return errors.New("partition names must be nonempty and have no surrounding spaces")
+		}
+		if seen[name] {
+			return fmt.Errorf("duplicate partition name %q", name)
+		}
+		seen[name] = true
+	}
+	return nil
 }

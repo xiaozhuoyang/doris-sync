@@ -31,6 +31,7 @@
   "includeTables": "",
   "excludeTables": "",
   "includePartitions": "",
+  "partitions": [],
   "metadataTimeout": "10m",
   "interval": "1h"
 }
