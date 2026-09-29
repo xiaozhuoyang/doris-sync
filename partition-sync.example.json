@@ -35,5 +35,6 @@
   "metadataTimeout": "10m",
   "interval": "1h",
   "hourlyStart": "",
-  "timeZone": "UTC"
+  "timeZone": "UTC",
+  "managedTasks": false
 }

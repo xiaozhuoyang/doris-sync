@@ -59,6 +59,14 @@ func hourlyCutoff(now time.Time) time.Time {
 }
 
 func (s *syncState) checkHourlySettings(start, zone string) error {
+	var managed string
+	err := s.db.QueryRow("SELECT value FROM metadata WHERE key='hourly_managed'").Scan(&managed)
+	if err == nil {
+		return fmt.Errorf("state file belongs to managed hourly tasks; use a new state file for static hourly-window mode")
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return persistenceError(err)
+	}
 	for key, value := range map[string]string{"hourly_start": start, "time_zone": zone} {
 		var existing string
 		err := s.db.QueryRow("SELECT value FROM metadata WHERE key=?", key).Scan(&existing)
@@ -106,6 +114,9 @@ func (s *syncState) saveHourly(pair DatabasePair, table string, entry *hourlySta
 }
 
 func (s *syncer) cycleHourly(ctx context.Context) error {
+	if s.options.ManagedTasks {
+		return s.cycleManagedHourly(ctx)
+	}
 	s.logger.Printf("CYCLE_START sync_mode=hourly-window")
 	var failures []error
 	var processed int
@@ -135,7 +146,7 @@ func (s *syncer) cycleHourly(ctx context.Context) error {
 			ready, err := s.ensureTargetTable(ctx, pair, table, targetTables, &stats{})
 			if err == nil && ready {
 				var count int
-				count, err = s.syncHourlyTable(ctx, pair, table)
+				count, err = s.syncHourlyTable(ctx, hourlyTask{Pair: pair, Table: table, TimeField: s.state.TimeField, Start: s.options.HourlyStart, TimeZone: s.options.TimeZone})
 				processed += count
 			}
 			if err != nil {
@@ -151,12 +162,76 @@ func (s *syncer) cycleHourly(ctx context.Context) error {
 	return errors.Join(failures...)
 }
 
-func (s *syncer) syncHourlyTable(ctx context.Context, pair DatabasePair, table string) (int, error) {
+func (s *syncer) cycleManagedHourly(ctx context.Context) error {
+	s.logger.Printf("CYCLE_START sync_mode=hourly-window managed_tasks=true")
+	tasks, err := s.state.listHourlyTasks()
+	if err != nil {
+		return err
+	}
+	allowed := make(map[string]bool, len(s.options.Databases))
+	for _, pair := range s.options.Databases {
+		allowed[stateKey(pair.Source, pair.Target, "", "")] = true
+	}
+	targetTables := make(map[string]map[string]bool)
+	var failures []error
+	var processed int
+	for _, task := range tasks {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var count int
+		var taskErr error
+		if !allowed[stateKey(task.Pair.Source, task.Pair.Target, "", "")] {
+			taskErr = fmt.Errorf("database mapping %s -> %s is not configured", task.Pair.Source, task.Pair.Target)
+		} else {
+			byName := targetTables[task.Pair.Target]
+			if byName == nil {
+				if taskErr = s.target.exec(ctx, "CREATE DATABASE IF NOT EXISTS "+ident(task.Pair.Target)); taskErr == nil {
+					var names []string
+					names, taskErr = s.target.tables(ctx, task.Pair.Target)
+					if taskErr == nil {
+						byName = make(map[string]bool, len(names))
+						for _, name := range names {
+							byName[name] = true
+						}
+						targetTables[task.Pair.Target] = byName
+					}
+				}
+			}
+			if taskErr == nil {
+				var ready bool
+				ready, taskErr = s.ensureTargetTable(ctx, task.Pair, task.Table, byName, &stats{})
+				if taskErr == nil && !ready {
+					taskErr = fmt.Errorf("source table is not a supported OLAP table")
+				}
+			}
+			if taskErr == nil {
+				count, taskErr = s.syncHourlyTable(ctx, task)
+			}
+		}
+		if err := s.state.saveHourlyTaskResult(task, count, taskErr); err != nil {
+			return err
+		}
+		processed += count
+		if taskErr != nil {
+			if errors.Is(taskErr, errStatePersistence) {
+				return taskErr
+			}
+			failures = append(failures, fmt.Errorf("%s.%s: %w", task.Pair.Source, task.Table, taskErr))
+			s.logger.Printf("TASK_FAILED database=%s table=%s error=%q", task.Pair.Source, task.Table, taskErr)
+		}
+	}
+	s.logger.Printf("HOURLY_SUMMARY tasks=%d windows_completed=%d failed_tasks=%d", len(tasks), processed, len(failures))
+	return errors.Join(failures...)
+}
+
+func (s *syncer) syncHourlyTable(ctx context.Context, task hourlyTask) (int, error) {
+	pair, table := task.Pair, task.Table
 	cols, err := s.source.columns(ctx, pair.Source, table)
 	if err != nil {
 		return 0, err
 	}
-	if err := validateHourlyTimeField(cols, s.state.TimeField); err != nil {
+	if err := validateHourlyTimeField(cols, task.TimeField); err != nil {
 		return 0, err
 	}
 	targetCols, err := s.target.columns(ctx, pair.Target, table)
@@ -177,11 +252,11 @@ func (s *syncer) syncHourlyTable(ctx context.Context, pair DatabasePair, table s
 	if err := s.state.saveTable(key); err != nil {
 		return 0, err
 	}
-	entry, err := s.state.loadHourly(pair, table, s.options.HourlyStart)
+	entry, err := s.state.loadHourly(pair, table, task.Start)
 	if err != nil {
 		return 0, err
 	}
-	loc, _ := time.LoadLocation(s.options.TimeZone)
+	loc, _ := time.LoadLocation(task.TimeZone)
 	columns := make([]string, len(cols))
 	for i, col := range cols {
 		columns[i] = col.Name
@@ -191,18 +266,18 @@ func (s *syncer) syncHourlyTable(ctx context.Context, pair DatabasePair, table s
 		if err := ctx.Err(); err != nil {
 			return completed, err
 		}
-		start, err := parseHourlyStart(entry.Next, s.options.TimeZone)
+		start, err := parseHourlyStart(entry.Next, task.TimeZone)
 		if err != nil {
 			return completed, err
 		}
 		end := start.Add(time.Hour)
 		if end.Format(hourlyLayout) <= start.Format(hourlyLayout) {
-			return completed, fmt.Errorf("timeZone %s has a repeated hour; use a fixed-offset zone for hourly-window mode", s.options.TimeZone)
+			return completed, fmt.Errorf("timeZone %s has a repeated hour; use a fixed-offset zone for hourly-window mode", task.TimeZone)
 		}
 		if end.After(hourlyCutoff(time.Now().In(loc))) {
 			return completed, nil
 		}
-		if err := s.syncHourlyWindow(ctx, pair, table, columns, entry, start, end); err != nil {
+		if err := s.syncHourlyWindow(ctx, task, columns, entry, start, end); err != nil {
 			return completed, err
 		}
 		completed++
@@ -213,7 +288,8 @@ func hourlyWhere(field string, start, end time.Time) string {
 	return " WHERE " + ident(field) + " >= " + sqlLiteral(start.Format(hourlyLayout)) + " AND " + ident(field) + " < " + sqlLiteral(end.Format(hourlyLayout))
 }
 
-func (s *syncer) syncHourlyWindow(ctx context.Context, pair DatabasePair, table string, columns []string, entry *hourlyState, start, end time.Time) error {
+func (s *syncer) syncHourlyWindow(ctx context.Context, task hourlyTask, columns []string, entry *hourlyState, start, end time.Time) error {
+	pair, table := task.Pair, task.Table
 	from, to := start.Format(hourlyLayout), end.Format(hourlyLayout)
 	if entry.Pending == nil {
 		entry.Pending = &hourlyPending{From: from, To: to}
@@ -235,7 +311,7 @@ func (s *syncer) syncHourlyWindow(ctx context.Context, pair DatabasePair, table 
 		if err := s.state.saveHourly(pair, table, entry); err != nil {
 			return err
 		}
-		where := hourlyWhere(s.state.TimeField, start, end)
+		where := hourlyWhere(task.TimeField, start, end)
 		probe, err := s.source.query(ctx, "SELECT 1 FROM "+qtable(pair.Source, table)+where+" LIMIT 1")
 		if err != nil {
 			return err

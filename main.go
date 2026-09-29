@@ -33,6 +33,13 @@ type syncer struct {
 type stats struct{ tables, skipped, backedUp, imported, unchanged, failed int }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "task" {
+		if err := runTaskCommand(os.Args[2:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "task:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	configFile := flag.String("config", "partition-sync.json", "configuration file")
 	status := flag.Bool("status", false, "print the current SQLite checkpoint as JSON without connecting to SelectDB")
 	statusStateFile := flag.String("state-file", "partition-sync-state.db", "SQLite state file for --status")
@@ -61,27 +68,40 @@ func run(configFile string, once bool, checkInterval, syncMode, timeField, parti
 	if syncMode != "overwrite" && syncMode != "time-window" && syncMode != "hourly-window" {
 		return fmt.Errorf("--sync-mode must be overwrite, time-window, or hourly-window")
 	}
-	if syncMode != "overwrite" && strings.TrimSpace(timeField) == "" {
-		return fmt.Errorf("--time-field is required in %s mode", syncMode)
-	}
-	if syncMode == "overwrite" && timeField != "" {
-		return fmt.Errorf("--time-field is only valid in time-window mode")
-	}
 	o, err := loadOptions(configFile)
 	if err != nil {
 		return err
 	}
+	if syncMode == "time-window" && strings.TrimSpace(timeField) == "" {
+		return fmt.Errorf("--time-field is required in time-window mode")
+	}
+	if syncMode == "overwrite" && timeField != "" {
+		return fmt.Errorf("--time-field is only valid in time-window or hourly-window mode")
+	}
+	if o.ManagedTasks {
+		if syncMode != "hourly-window" || timeField != "" || windowStart != "" || o.HourlyStart != "" {
+			return fmt.Errorf("managedTasks requires hourly-window mode with per-task time fields and starts")
+		}
+		if o.IncludeTables != "" || o.ExcludeTables != "" {
+			return fmt.Errorf("table filters are not used with managedTasks")
+		}
+		if len(o.Partitions) > 0 || o.IncludePartitions != "" || partitions != "" {
+			return fmt.Errorf("partition filters are not supported in hourly-window mode")
+		}
+	} else if syncMode == "hourly-window" && strings.TrimSpace(timeField) == "" {
+		return fmt.Errorf("--time-field is required in static hourly-window mode")
+	}
 	if windowStart != "" {
 		o.HourlyStart = windowStart
 	}
-	if syncMode == "hourly-window" {
+	if syncMode == "hourly-window" && !o.ManagedTasks {
 		if _, err := parseHourlyStart(o.HourlyStart, o.TimeZone); err != nil {
 			return err
 		}
 		if len(o.Partitions) > 0 || o.IncludePartitions != "" {
 			return fmt.Errorf("partition filters are not supported in hourly-window mode")
 		}
-	} else if windowStart != "" || o.HourlyStart != "" {
+	} else if !o.ManagedTasks && (windowStart != "" || o.HourlyStart != "") {
 		return fmt.Errorf("hourlyStart and --window-start require hourly-window mode")
 	}
 	if partitions != "" {
@@ -143,7 +163,13 @@ func run(configFile string, once bool, checkInterval, syncMode, timeField, parti
 		return fmt.Errorf("state file uses time field %q, cannot restart with %q", state.TimeField, timeField)
 	}
 	if syncMode == "hourly-window" {
-		if err := state.checkHourlySettings(o.HourlyStart, o.TimeZone); err != nil {
+		var err error
+		if o.ManagedTasks {
+			err = state.checkManagedHourlySettings()
+		} else {
+			err = state.checkHourlySettings(o.HourlyStart, o.TimeZone)
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -163,7 +189,10 @@ func run(configFile string, once bool, checkInterval, syncMode, timeField, parti
 		} else {
 			cycleErr = s.cycle(ctx)
 		}
-		if o.Interval == "" || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		if o.Interval == "" {
 			return cycleErr
 		}
 		if cycleErr != nil {
@@ -175,7 +204,7 @@ func run(configFile string, once bool, checkInterval, syncMode, timeField, parti
 		interval, _ := time.ParseDuration(o.Interval)
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil
 		case <-time.After(interval):
 		}
 	}

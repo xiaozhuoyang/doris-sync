@@ -14,16 +14,16 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/doris-partition-sync-linu
 Build a self-contained Linux amd64 package on macOS or Linux:
 
 ```bash
-sh deploy/build-package.sh v1.0.5
+sh deploy/build-package.sh v1.0.6
 ```
 
-The resulting `dist/doris-partition-sync-v1.0.5-linux-amd64.tar.gz` contains the static executable, example config, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
+The resulting `dist/doris-partition-sync-v1.0.6-linux-amd64.tar.gz` contains the static executable, example config, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
 
 On the Linux host, extract the package, prepare real config and credentials, then install and start the service:
 
 ```bash
-tar -xzf doris-partition-sync-v1.0.5-linux-amd64.tar.gz
-cd doris-partition-sync-v1.0.5-linux-amd64
+tar -xzf doris-partition-sync-v1.0.6-linux-amd64.tar.gz
+cd doris-partition-sync-v1.0.6-linux-amd64
 cp partition-sync.example.json partition-sync.json
 cp partition-sync.env.example partition-sync.env
 # Edit partition-sync.json and partition-sync.env for your source, target, bucket, and credentials.
@@ -68,6 +68,32 @@ For continuous checks, omit `--once`. Three modes are available:
 ```
 
 For `hourly-window`, set `timeZone` (for example `Asia/Shanghai`) and `hourlyStart` in the config, or pass `--window-start` to override the configured start. The start must be an exact hour in that time zone and remains fixed in SQLite after the first run. For systemd, set `SYNC_MODE=hourly-window` and `TIME_FIELD=event_time` in `partition-sync.env`, and set `hourlyStart`, `timeZone`, and `interval` in `partition-sync.json`. Use a new SQLite state file and dedicated bucket prefix when switching modes. Partition filters are not supported in this mode.
+
+### Managed hourly tasks
+
+To keep one service running and add tables without restarting it, configure the source/target FE connections, database mappings, S3 bucket, and a dedicated SQLite state file as above. Set `"managedTasks": true`, `"interval": "1m"`, and leave `hourlyStart`, `timeField`, and `includeTables` unset in the JSON config. Set `SYNC_MODE=hourly-window` in the installed `partition-sync.env` and leave `TIME_FIELD` unset. Then install/start the service with `install.sh`, or start it manually without `--once`:
+
+```bash
+./doris-partition-sync --config ./partition-sync.json --sync-mode hourly-window
+```
+
+Add a table while the service is running. The source/target database pair must appear in `databases` in the service config; each table chooses its own DATETIME field and exact-hour start. The service discovers new tasks on its next scan. Run these commands as the service user so the SQLite file remains writable:
+
+```bash
+/opt/doris-partition-sync/doris-partition-sync task add \
+  --state-file /var/lib/doris-partition-sync/partition-sync-state.db \
+  --source-db source_db --target-db target_db --table orders \
+  --time-field event_time --start '2026-09-29 08:00:00' --time-zone Asia/Shanghai
+
+/opt/doris-partition-sync/doris-partition-sync task status \
+  --state-file /var/lib/doris-partition-sync/partition-sync-state.db \
+  --source-db source_db --target-db target_db --table orders
+
+/opt/doris-partition-sync/doris-partition-sync task list \
+  --state-file /var/lib/doris-partition-sync/partition-sync-state.db
+```
+
+`task status` returns the saved `nextStart` (the first uncommitted hour), current `phase`, pending window, last completed window time, and last error. A new task starts as `queued`; the service then processes each eligible hour in order. To observe service logs, run `journalctl -u doris-partition-sync -f`. Keep the state file and bucket prefix when restarting so committed hours are not replayed. Managed and static hourly modes require separate state files.
 
 At 10:00 local time, the newest eligible window is `[08:00, 09:00)`. The tool processes all eligible hours from its saved `nextStart` in order; it never skips backlog to jump to the newest hour. Each window exports rows satisfying `time_field >= start AND time_field < end` across the table, then performs a labeled import. Empty windows are checkpointed too. The next start is persisted only after successful import verification, and an interrupted import is reconciled through `SHOW LOAD` before advancing. The field must be `DATETIME`; use a fixed-offset time zone such as `UTC` or `Asia/Shanghai`. The target must not already contain rows in the chosen initial time range, or append imports will duplicate them.
 

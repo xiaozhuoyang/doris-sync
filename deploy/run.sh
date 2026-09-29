@@ -14,10 +14,13 @@ case "$mode" in
       --time-field "$TIME_FIELD"
     ;;
   hourly-window)
-    [ -n "${TIME_FIELD:-}" ] || { echo 'TIME_FIELD is required for hourly-window mode.' >&2; exit 2; }
+    if [ -n "${TIME_FIELD:-}" ]; then
+      exec /opt/doris-partition-sync/doris-partition-sync \
+        --config /etc/doris-partition-sync/partition-sync.json --sync-mode hourly-window \
+        --time-field "$TIME_FIELD"
+    fi
     exec /opt/doris-partition-sync/doris-partition-sync \
-      --config /etc/doris-partition-sync/partition-sync.json --sync-mode hourly-window \
-      --time-field "$TIME_FIELD"
+      --config /etc/doris-partition-sync/partition-sync.json --sync-mode hourly-window
     ;;
   *) echo "Invalid SYNC_MODE: $mode" >&2; exit 2 ;;
 esac

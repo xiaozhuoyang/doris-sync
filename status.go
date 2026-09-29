@@ -37,6 +37,7 @@ type statusPartition struct {
 
 type statusReport struct {
 	Mode                         string            `json:"mode"`
+	ManagedTasks                 bool              `json:"managedTasks,omitempty"`
 	TimeField                    string            `json:"timeField,omitempty"`
 	TimeZone                     string            `json:"timeZone,omitempty"`
 	HourlyStart                  string            `json:"hourlyStart,omitempty"`
@@ -55,9 +56,14 @@ type statusHourly struct {
 	SourceDatabase string `json:"sourceDatabase"`
 	TargetDatabase string `json:"targetDatabase"`
 	Table          string `json:"table"`
+	TimeField      string `json:"timeField,omitempty"`
+	Start          string `json:"start,omitempty"`
+	TimeZone       string `json:"timeZone,omitempty"`
 	NextStart      string `json:"nextStart"`
 	PendingEnd     string `json:"pendingEnd,omitempty"`
 	Phase          string `json:"phase"`
+	LastSuccessAt  string `json:"lastSuccessAt,omitempty"`
+	LastError      string `json:"lastError,omitempty"`
 }
 
 func readStatus(path string) (statusReport, error) {
@@ -72,7 +78,7 @@ func readStatus(path string) (statusReport, error) {
 	}
 	defer db.Close()
 	report := statusReport{Tables: []statusTable{}, ActivePartitions: []statusPartition{}, IncrementalSyncingPartitions: []statusPartition{}}
-	metadata, err := db.Query("SELECT key, value FROM metadata WHERE key IN ('mode', 'time_field', 'time_zone', 'hourly_start')")
+	metadata, err := db.Query("SELECT key, value FROM metadata WHERE key IN ('mode', 'time_field', 'time_zone', 'hourly_start', 'hourly_managed')")
 	if err != nil {
 		return report, err
 	}
@@ -91,6 +97,8 @@ func readStatus(path string) (statusReport, error) {
 			report.TimeZone = value
 		case "hourly_start":
 			report.HourlyStart = value
+		case "hourly_managed":
+			report.ManagedTasks = value == "1"
 		}
 	}
 	if err := metadata.Err(); err != nil {
@@ -98,6 +106,42 @@ func readStatus(path string) (statusReport, error) {
 		return report, err
 	}
 	metadata.Close()
+	if report.ManagedTasks {
+		rows, err := db.Query(`SELECT t.source_db,t.target_db,t.table_name,t.time_field,t.start_time,t.time_zone,
+			t.last_error,t.last_success_at,s.state_json FROM hourly_task t LEFT JOIN hourly_state s
+			ON t.source_db=s.source_db AND t.target_db=s.target_db AND t.table_name=s.table_name
+			ORDER BY t.source_db,t.target_db,t.table_name`)
+		if err != nil {
+			return report, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item statusHourly
+			var raw sql.NullString
+			if err := rows.Scan(&item.SourceDatabase, &item.TargetDatabase, &item.Table, &item.TimeField, &item.Start, &item.TimeZone, &item.LastError, &item.LastSuccessAt, &raw); err != nil {
+				return report, err
+			}
+			item.NextStart, item.Phase = item.Start, "queued"
+			if raw.Valid {
+				var entry hourlyState
+				if err := json.Unmarshal([]byte(raw.String), &entry); err != nil {
+					return report, err
+				}
+				item.NextStart, item.Phase = entry.Next, "waiting"
+				if entry.Pending != nil {
+					item.PendingEnd, item.Phase = entry.Pending.To, "backing_up"
+					if entry.Pending.BackupReady {
+						item.Phase = "importing"
+					}
+				}
+			}
+			if item.LastError != "" {
+				item.Phase = "error"
+			}
+			report.HourlyWindows = append(report.HourlyWindows, item)
+		}
+		return report, rows.Err()
+	}
 	if report.Mode == "hourly-window" {
 		rows, err := db.Query("SELECT source_db, target_db, table_name, state_json FROM hourly_state ORDER BY source_db, target_db, table_name")
 		if err != nil {
