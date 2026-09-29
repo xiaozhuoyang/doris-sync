@@ -76,6 +76,7 @@ func openState(path string) (*syncState, error) {
 		"CREATE TABLE IF NOT EXISTS table_state (source_db TEXT NOT NULL, target_db TEXT NOT NULL, table_name TEXT NOT NULL, schema_hash TEXT NOT NULL, PRIMARY KEY(source_db, target_db, table_name))",
 		"CREATE TABLE IF NOT EXISTS table_inventory (source_db TEXT NOT NULL, target_db TEXT NOT NULL, table_name TEXT NOT NULL, partition_count INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(source_db, target_db, table_name))",
 		"CREATE TABLE IF NOT EXISTS partition_state (source_db TEXT NOT NULL, target_db TEXT NOT NULL, table_name TEXT NOT NULL, partition_name TEXT NOT NULL, source_identity TEXT NOT NULL, backup_identity TEXT NOT NULL, imported_identity TEXT NOT NULL, watermark TEXT NOT NULL, backup_ready INTEGER NOT NULL, import_in_progress INTEGER NOT NULL, updated_at TEXT NOT NULL, state_json TEXT NOT NULL, PRIMARY KEY(source_db, target_db, table_name, partition_name))",
+		"CREATE TABLE IF NOT EXISTS hourly_state (source_db TEXT NOT NULL, target_db TEXT NOT NULL, table_name TEXT NOT NULL, state_json TEXT NOT NULL, PRIMARY KEY(source_db, target_db, table_name))",
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			return fail(err)

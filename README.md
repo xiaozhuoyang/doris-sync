@@ -14,16 +14,16 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/doris-partition-sync-linu
 Build a self-contained Linux amd64 package on macOS or Linux:
 
 ```bash
-sh deploy/build-package.sh v1.0.4
+sh deploy/build-package.sh v1.0.5
 ```
 
-The resulting `dist/doris-partition-sync-v1.0.4-linux-amd64.tar.gz` contains the static executable, example config, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
+The resulting `dist/doris-partition-sync-v1.0.5-linux-amd64.tar.gz` contains the static executable, example config, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
 
 On the Linux host, extract the package, prepare real config and credentials, then install and start the service:
 
 ```bash
-tar -xzf doris-partition-sync-v1.0.4-linux-amd64.tar.gz
-cd doris-partition-sync-v1.0.4-linux-amd64
+tar -xzf doris-partition-sync-v1.0.5-linux-amd64.tar.gz
+cd doris-partition-sync-v1.0.5-linux-amd64
 cp partition-sync.example.json partition-sync.json
 cp partition-sync.env.example partition-sync.env
 # Edit partition-sync.json and partition-sync.env for your source, target, bucket, and credentials.
@@ -53,7 +53,7 @@ export S3_SECRET_KEY='...'
 ./dist/doris-partition-sync-linux-amd64 --config ./partition-sync.json --sync-mode overwrite --once
 ```
 
-For continuous checks, omit `--once`. Two modes are available:
+For continuous checks, omit `--once`. Three modes are available:
 
 ```bash
 # Default: re-export and atomically replace each changed partition.
@@ -61,7 +61,15 @@ For continuous checks, omit `--once`. Two modes are available:
 
 # Append-only data: export and import only rows after the saved time watermark.
 ./dist/doris-partition-sync-linux-amd64 --config ./partition-sync.json --sync-mode time-window --time-field event_time --check-interval 1h
+
+# Contiguous one-hour windows starting at an explicit wall-clock hour.
+./dist/doris-partition-sync-linux-amd64 --config ./partition-sync.json --sync-mode hourly-window \
+  --time-field event_time --window-start '2026-09-29 08:00:00' --check-interval 1m
 ```
+
+For `hourly-window`, set `timeZone` (for example `Asia/Shanghai`) and `hourlyStart` in the config, or pass `--window-start` to override the configured start. The start must be an exact hour in that time zone and remains fixed in SQLite after the first run. For systemd, set `SYNC_MODE=hourly-window` and `TIME_FIELD=event_time` in `partition-sync.env`, and set `hourlyStart`, `timeZone`, and `interval` in `partition-sync.json`. Use a new SQLite state file and dedicated bucket prefix when switching modes. Partition filters are not supported in this mode.
+
+At 10:00 local time, the newest eligible window is `[08:00, 09:00)`. The tool processes all eligible hours from its saved `nextStart` in order; it never skips backlog to jump to the newest hour. Each window exports rows satisfying `time_field >= start AND time_field < end` across the table, then performs a labeled import. Empty windows are checkpointed too. The next start is persisted only after successful import verification, and an interrupted import is reconciled through `SHOW LOAD` before advancing. The field must be `DATETIME`; use a fixed-offset time zone such as `UTC` or `Asia/Shanghai`. The target must not already contain rows in the chosen initial time range, or append imports will duplicate them.
 
 The interval defaults to `1h`, can be set in the config as `interval`, and can be overridden with `--check-interval`. Every partition joins version checks as soon as its first import succeeds; other partitions can still be doing their initial sync. `--once` runs one complete scan. `stateFile` is a SQLite database (default `partition-sync-state.db`) and must be on persistent local storage. Only one process may use it at a time. Mode and time field are recorded in SQLite and cannot be changed on restart; use a separate state database and dedicated bucket prefix to start a different mode. `source.cluster` and `target.cluster` can select different SelectDB compute clusters; `session` contains `SET` assignments such as `query_timeout=7200`.
 
@@ -89,6 +97,8 @@ For AWS IAM, set `authMode` to `iam`, remove `accessKey` and `secretKey`, set `r
 
 If the SelectDB nodes use a private OSS/S3 endpoint but the sync process runs outside that network, set `s3.endpoint` to the private endpoint and `s3.clientEndpoint` to the public endpoint. OUTFILE and S3 TVF use `endpoint`; local object listing and cleanup use `clientEndpoint` (or `endpoint` when omitted).
 
+In `hourly-window` mode, `--status` reports `hourlyStart`, `timeZone`, and one `hourlyWindows` entry per table. `nextStart` is the first uncommitted hour; `pendingEnd` and `phase` show an interrupted or in-progress window.
+
 ## Workflow
 
 1. `SHOW TABLES` and `SHOW CREATE TABLE` discover the source. Async materialized views are skipped. All missing target tables are created before any partition data is copied, including empty tables. `DESC` and `SHOW PARTITIONS` validate and read each table during data sync. For automatic partitioning, source partition instances are omitted from the target DDL so the target creates partitions as data arrives.
@@ -107,6 +117,8 @@ sqlite3 partition-sync-state.db 'SELECT source_db, target_db, table_name, partit
 ```
 
 ## Constraints
+
+- `hourly-window` guarantees contiguous processed time ranges, not capture of late inserts or updates to an already completed hour. Rows committed after that hour has been checkpointed require a separate replay/overwrite strategy; do not rewind the SQLite cursor against a populated Duplicate Key target. A window should have settled before it becomes eligible. A daylight-saving-time zone can have repeated local hours; the tool stops at such a boundary instead of silently duplicating a window.
 
 - The target table must have compatible automatic partitioning. If a target partition cannot be matched by range or name after import, the tool stops for that partition to prevent duplicate writes.
 - Column changes in an existing table require a schema migration before the next sync. The tool creates missing tables, but does not apply `ALTER TABLE` for existing tables.

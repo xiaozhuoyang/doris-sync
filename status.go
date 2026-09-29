@@ -38,6 +38,9 @@ type statusPartition struct {
 type statusReport struct {
 	Mode                         string            `json:"mode"`
 	TimeField                    string            `json:"timeField,omitempty"`
+	TimeZone                     string            `json:"timeZone,omitempty"`
+	HourlyStart                  string            `json:"hourlyStart,omitempty"`
+	HourlyWindows                []statusHourly    `json:"hourlyWindows,omitempty"`
 	KnownTotalPartitions         int               `json:"knownTotalPartitions"`
 	CurrentPartitions            int               `json:"currentPartitions"`
 	ProgressPercent              float64           `json:"progressPercent"`
@@ -46,6 +49,15 @@ type statusReport struct {
 	Tables                       []statusTable     `json:"tables"`
 	ActivePartitions             []statusPartition `json:"activePartitions"`
 	IncrementalSyncingPartitions []statusPartition `json:"incrementalSyncingPartitions"`
+}
+
+type statusHourly struct {
+	SourceDatabase string `json:"sourceDatabase"`
+	TargetDatabase string `json:"targetDatabase"`
+	Table          string `json:"table"`
+	NextStart      string `json:"nextStart"`
+	PendingEnd     string `json:"pendingEnd,omitempty"`
+	Phase          string `json:"phase"`
 }
 
 func readStatus(path string) (statusReport, error) {
@@ -60,7 +72,7 @@ func readStatus(path string) (statusReport, error) {
 	}
 	defer db.Close()
 	report := statusReport{Tables: []statusTable{}, ActivePartitions: []statusPartition{}, IncrementalSyncingPartitions: []statusPartition{}}
-	metadata, err := db.Query("SELECT key, value FROM metadata WHERE key IN ('mode', 'time_field')")
+	metadata, err := db.Query("SELECT key, value FROM metadata WHERE key IN ('mode', 'time_field', 'time_zone', 'hourly_start')")
 	if err != nil {
 		return report, err
 	}
@@ -70,10 +82,15 @@ func readStatus(path string) (statusReport, error) {
 			metadata.Close()
 			return report, err
 		}
-		if key == "mode" {
+		switch key {
+		case "mode":
 			report.Mode = value
-		} else {
+		case "time_field":
 			report.TimeField = value
+		case "time_zone":
+			report.TimeZone = value
+		case "hourly_start":
+			report.HourlyStart = value
 		}
 	}
 	if err := metadata.Err(); err != nil {
@@ -81,6 +98,32 @@ func readStatus(path string) (statusReport, error) {
 		return report, err
 	}
 	metadata.Close()
+	if report.Mode == "hourly-window" {
+		rows, err := db.Query("SELECT source_db, target_db, table_name, state_json FROM hourly_state ORDER BY source_db, target_db, table_name")
+		if err != nil {
+			return report, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var source, target, table, raw string
+			if err := rows.Scan(&source, &target, &table, &raw); err != nil {
+				return report, err
+			}
+			var entry hourlyState
+			if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+				return report, err
+			}
+			item := statusHourly{SourceDatabase: source, TargetDatabase: target, Table: table, NextStart: entry.Next, Phase: "waiting"}
+			if entry.Pending != nil {
+				item.PendingEnd, item.Phase = entry.Pending.To, "backing_up"
+				if entry.Pending.BackupReady {
+					item.Phase = "importing"
+				}
+			}
+			report.HourlyWindows = append(report.HourlyWindows, item)
+		}
+		return report, rows.Err()
+	}
 
 	tables := map[string]*statusTable{}
 	var inventoryExists int

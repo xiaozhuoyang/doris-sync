@@ -92,14 +92,22 @@ func outfileSQL(db, table, partition, uri string, columns []string, cfg S3Option
 }
 
 func outfileWhereSQL(db, table, partition, uri string, columns []string, where string, cfg S3Options) string {
+	return outfileSelectSQL(qtable(db, table)+" PARTITION("+ident(partition)+")", uri, columns, where, cfg)
+}
+
+func outfileTableWhereSQL(db, table, uri string, columns []string, where string, cfg S3Options) string {
+	return outfileSelectSQL(qtable(db, table), uri, columns, where, cfg)
+}
+
+func outfileSelectSQL(from, uri string, columns []string, where string, cfg S3Options) string {
 	quoted := make([]string, len(columns))
 	for i, column := range columns {
 		quoted[i] = ident(column)
 	}
 	props := s3SQLProperties(cfg)
 	props["max_file_size"] = cfg.MaxFileSize
-	return fmt.Sprintf("SELECT %s FROM %s PARTITION(%s)%s INTO OUTFILE %s FORMAT AS PARQUET PROPERTIES (%s)",
-		strings.Join(quoted, ", "), qtable(db, table), ident(partition), where, sqlString(uri), sqlProperties(props))
+	return fmt.Sprintf("SELECT %s FROM %s%s INTO OUTFILE %s FORMAT AS PARQUET PROPERTIES (%s)",
+		strings.Join(quoted, ", "), from, where, sqlString(uri), sqlProperties(props))
 }
 
 func importSQL(db, table, uri string, columns []string, cfg S3Options) string {

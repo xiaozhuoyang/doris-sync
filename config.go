@@ -50,6 +50,8 @@ type Options struct {
 	Partitions        []string       `json:"partitions"`
 	MetadataTimeout   string         `json:"metadataTimeout"`
 	Interval          string         `json:"interval"`
+	HourlyStart       string         `json:"hourlyStart"`
+	TimeZone          string         `json:"timeZone"`
 }
 
 func loadOptions(path string) (Options, error) {
@@ -78,6 +80,12 @@ func loadOptions(path string) (Options, error) {
 	}
 	if o.MetadataTimeout == "" {
 		o.MetadataTimeout = "10m"
+	}
+	if o.TimeZone == "" {
+		o.TimeZone = "UTC"
+	}
+	if _, err := time.LoadLocation(o.TimeZone); err != nil {
+		return o, fmt.Errorf("timeZone: %w", err)
 	}
 	if o.S3.MaxFileSize == "" {
 		o.S3.MaxFileSize = "1024MB"

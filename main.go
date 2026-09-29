@@ -37,9 +37,10 @@ func main() {
 	status := flag.Bool("status", false, "print the current SQLite checkpoint as JSON without connecting to SelectDB")
 	statusStateFile := flag.String("state-file", "partition-sync-state.db", "SQLite state file for --status")
 	once := flag.Bool("once", false, "run one synchronization cycle even when interval is configured")
-	checkInterval := flag.String("check-interval", "", "visible version check interval (default 1h)")
-	syncMode := flag.String("sync-mode", "overwrite", "incremental mode: overwrite or time-window")
-	timeField := flag.String("time-field", "", "DATE/DATETIME column required for time-window mode")
+	checkInterval := flag.String("check-interval", "", "sync scan interval (default 1h)")
+	syncMode := flag.String("sync-mode", "overwrite", "sync mode: overwrite, time-window, or hourly-window")
+	timeField := flag.String("time-field", "", "DATE/DATETIME column required for time-window and hourly-window modes")
+	windowStart := flag.String("window-start", "", "first hourly window start, YYYY-MM-DD HH:00:00; overrides hourlyStart in config")
 	partitions := flag.String("partitions", "", "comma-separated exact source partition names; overrides config partition filters")
 	flag.Parse()
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
@@ -50,18 +51,18 @@ func main() {
 		}
 		return
 	}
-	if err := run(*configFile, *once, *checkInterval, *syncMode, *timeField, *partitions, logger); err != nil {
+	if err := run(*configFile, *once, *checkInterval, *syncMode, *timeField, *partitions, *windowStart, logger); err != nil {
 		logger.Printf("FATAL error=%q", err)
 		os.Exit(1)
 	}
 }
 
-func run(configFile string, once bool, checkInterval, syncMode, timeField, partitions string, logger *log.Logger) error {
-	if syncMode != "overwrite" && syncMode != "time-window" {
-		return fmt.Errorf("--sync-mode must be overwrite or time-window")
+func run(configFile string, once bool, checkInterval, syncMode, timeField, partitions, windowStart string, logger *log.Logger) error {
+	if syncMode != "overwrite" && syncMode != "time-window" && syncMode != "hourly-window" {
+		return fmt.Errorf("--sync-mode must be overwrite, time-window, or hourly-window")
 	}
-	if syncMode == "time-window" && strings.TrimSpace(timeField) == "" {
-		return fmt.Errorf("--time-field is required in time-window mode")
+	if syncMode != "overwrite" && strings.TrimSpace(timeField) == "" {
+		return fmt.Errorf("--time-field is required in %s mode", syncMode)
 	}
 	if syncMode == "overwrite" && timeField != "" {
 		return fmt.Errorf("--time-field is only valid in time-window mode")
@@ -69,6 +70,19 @@ func run(configFile string, once bool, checkInterval, syncMode, timeField, parti
 	o, err := loadOptions(configFile)
 	if err != nil {
 		return err
+	}
+	if windowStart != "" {
+		o.HourlyStart = windowStart
+	}
+	if syncMode == "hourly-window" {
+		if _, err := parseHourlyStart(o.HourlyStart, o.TimeZone); err != nil {
+			return err
+		}
+		if len(o.Partitions) > 0 || o.IncludePartitions != "" {
+			return fmt.Errorf("partition filters are not supported in hourly-window mode")
+		}
+	} else if windowStart != "" || o.HourlyStart != "" {
+		return fmt.Errorf("hourlyStart and --window-start require hourly-window mode")
 	}
 	if partitions != "" {
 		names, err := parsePartitionNames(partitions)
@@ -128,6 +142,11 @@ func run(configFile string, once bool, checkInterval, syncMode, timeField, parti
 	if state.TimeField != "" && state.TimeField != timeField {
 		return fmt.Errorf("state file uses time field %q, cannot restart with %q", state.TimeField, timeField)
 	}
+	if syncMode == "hourly-window" {
+		if err := state.checkHourlySettings(o.HourlyStart, o.TimeZone); err != nil {
+			return err
+		}
+	}
 	state.Mode, state.TimeField = syncMode, timeField
 	if err := state.saveMetadata(); err != nil {
 		return err
@@ -138,7 +157,12 @@ func run(configFile string, once bool, checkInterval, syncMode, timeField, parti
 		s.nextVersionCheck = time.Now().Add(interval)
 	}
 	for {
-		cycleErr := s.cycle(ctx)
+		var cycleErr error
+		if syncMode == "hourly-window" {
+			cycleErr = s.cycleHourly(ctx)
+		} else {
+			cycleErr = s.cycle(ctx)
+		}
 		if o.Interval == "" || ctx.Err() != nil {
 			return cycleErr
 		}
