@@ -133,6 +133,14 @@ func importLabeledSQL(db, table, uri string, columns []string, label string, cfg
 func sqlLiteral(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
 func overwriteSQL(db, table, partition, uri string, columns []string, empty bool, cfg S3Options) string {
+	return overwriteSelectSQL(db, table, " PARTITION("+ident(partition)+")", uri, columns, empty, cfg)
+}
+
+func overwriteTableSQL(db, table, uri string, columns []string, empty bool, cfg S3Options) string {
+	return overwriteSelectSQL(db, table, "", uri, columns, empty, cfg)
+}
+
+func overwriteSelectSQL(db, table, partitionClause, uri string, columns []string, empty bool, cfg S3Options) string {
 	quoted := make([]string, len(columns))
 	for i, column := range columns {
 		quoted[i] = ident(column)
@@ -145,7 +153,7 @@ func overwriteSQL(db, table, partition, uri string, columns []string, empty bool
 		props["uri"], props["format"] = uri, "parquet"
 		selectSQL += " FROM s3(" + sqlProperties(props) + ")"
 	}
-	return "INSERT OVERWRITE TABLE " + qtable(db, table) + " PARTITION(" + ident(partition) + ") (" + strings.Join(quoted, ", ") + ") " + selectSQL
+	return "INSERT OVERWRITE TABLE " + qtable(db, table) + partitionClause + " (" + strings.Join(quoted, ", ") + ") " + selectSQL
 }
 
 func s3SQLProperties(cfg S3Options) map[string]string {

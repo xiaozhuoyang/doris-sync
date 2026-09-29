@@ -221,7 +221,62 @@ func (s *syncer) cycleManagedHourly(ctx context.Context) error {
 			s.logger.Printf("TASK_FAILED database=%s table=%s error=%q", task.Pair.Source, task.Table, taskErr)
 		}
 	}
-	s.logger.Printf("HOURLY_SUMMARY tasks=%d windows_completed=%d failed_tasks=%d", len(tasks), processed, len(failures))
+	fullTasks, err := s.state.listFullTableTasks()
+	if err != nil {
+		return err
+	}
+	fullCompleted := 0
+	for _, task := range fullTasks {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		due, taskErr := fullTableDue(task, time.Now())
+		if taskErr == nil && !due {
+			continue
+		}
+		if taskErr == nil && !allowed[stateKey(task.Pair.Source, task.Pair.Target, "", "")] {
+			taskErr = fmt.Errorf("database mapping %s -> %s is not configured", task.Pair.Source, task.Pair.Target)
+		}
+		if taskErr == nil {
+			byName := targetTables[task.Pair.Target]
+			if byName == nil {
+				if taskErr = s.target.exec(ctx, "CREATE DATABASE IF NOT EXISTS "+ident(task.Pair.Target)); taskErr == nil {
+					var names []string
+					names, taskErr = s.target.tables(ctx, task.Pair.Target)
+					if taskErr == nil {
+						byName = make(map[string]bool, len(names))
+						for _, name := range names {
+							byName[name] = true
+						}
+						targetTables[task.Pair.Target] = byName
+					}
+				}
+			}
+			if taskErr == nil {
+				taskErr = s.state.updateFullTableTask(task, "backing_up", nil, false)
+			}
+			if taskErr == nil {
+				taskErr = s.syncFullTable(ctx, task, byName)
+			}
+		}
+		if errors.Is(taskErr, errStatePersistence) {
+			return taskErr
+		}
+		phase := "waiting"
+		if taskErr != nil {
+			phase = "error"
+		}
+		if err := s.state.updateFullTableTask(task, phase, taskErr, taskErr == nil); err != nil {
+			return err
+		}
+		if taskErr != nil {
+			failures = append(failures, fmt.Errorf("%s.%s: %w", task.Pair.Source, task.Table, taskErr))
+			s.logger.Printf("TASK_FAILED database=%s table=%s error=%q", task.Pair.Source, task.Table, taskErr)
+		} else {
+			fullCompleted++
+		}
+	}
+	s.logger.Printf("HOURLY_SUMMARY tasks=%d full_table_tasks=%d windows_completed=%d full_table_completed=%d failed_tasks=%d", len(tasks), len(fullTasks), processed, fullCompleted, len(failures))
 	return errors.Join(failures...)
 }
 

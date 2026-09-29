@@ -54,11 +54,19 @@ func (s *syncState) addHourlyTask(task hourlyTask) error {
 	if err := s.checkManagedHourlySettings(); err != nil {
 		return err
 	}
+	var exists int
+	err := s.db.QueryRow("SELECT 1 FROM full_table_task WHERE source_db=? AND target_db=? AND table_name=?", task.Pair.Source, task.Pair.Target, task.Table).Scan(&exists)
+	if err == nil {
+		return fmt.Errorf("table already has a full-table task")
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return persistenceError(err)
+	}
 	s.Mode, s.TimeField = "hourly-window", ""
 	if err := s.saveMetadata(); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`INSERT INTO hourly_task(source_db,target_db,table_name,time_field,start_time,time_zone,created_at)
+	_, err = s.db.Exec(`INSERT INTO hourly_task(source_db,target_db,table_name,time_field,start_time,time_zone,created_at)
 		VALUES(?,?,?,?,?,?,?)`, task.Pair.Source, task.Pair.Target, task.Table, task.TimeField, task.Start, task.TimeZone, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("add task %s.%s: %w", task.Pair.Source, task.Table, err)

@@ -21,6 +21,8 @@ func runTaskCommand(args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("task "+command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	stateFile := flags.String("state-file", "partition-sync-state.db", "SQLite state file")
+	mode := flags.String("mode", "hourly-window", "hourly-window or full-table")
+	interval := flags.String("interval", "1h", "full-table refresh interval")
 	configFile := flags.String("config", "", "configuration file for live row comparison")
 	date := flags.String("date", "", "compare source and target rows for YYYY-MM-DD")
 	sourceDB := flags.String("source-db", "", "source database")
@@ -44,6 +46,27 @@ func runTaskCommand(args []string, out io.Writer) error {
 			return err
 		}
 		defer state.close()
+		if *mode == "full-table" {
+			if *timeField != "" || *start != "" {
+				return fmt.Errorf("full-table mode does not use --time-field or --start")
+			}
+			duration, err := time.ParseDuration(*interval)
+			if err != nil {
+				return fmt.Errorf("invalid --interval: %w", err)
+			}
+			task := fullTableTask{Pair: DatabasePair{Source: *sourceDB, Target: *targetDB}, Table: *table, Interval: duration}
+			if err := state.addFullTableTask(task); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(out, "TASK_ADDED mode=full-table source=%s target=%s table=%s interval=%s\n", *sourceDB, *targetDB, *table, duration)
+			return err
+		}
+		if *mode != "hourly-window" {
+			return fmt.Errorf("--mode must be hourly-window or full-table")
+		}
+		if *interval != "1h" {
+			return fmt.Errorf("--interval is only used in full-table mode")
+		}
 		task := hourlyTask{Pair: DatabasePair{Source: *sourceDB, Target: *targetDB}, Table: *table, TimeField: *timeField, Start: *start, TimeZone: *zone}
 		if err := state.addHourlyTask(task); err != nil {
 			return err
@@ -61,7 +84,14 @@ func runTaskCommand(args []string, out io.Writer) error {
 	encoder := json.NewEncoder(out)
 	encoder.SetIndent("", "  ")
 	if command == "list" {
-		return encoder.Encode(report.HourlyWindows)
+		items := make([]any, 0, len(report.HourlyWindows)+len(report.FullTableTasks))
+		for _, item := range report.HourlyWindows {
+			items = append(items, item)
+		}
+		for _, item := range report.FullTableTasks {
+			items = append(items, item)
+		}
+		return encoder.Encode(items)
 	}
 	if *sourceDB == "" || *targetDB == "" || *table == "" {
 		return fmt.Errorf("task status requires --source-db, --target-db, and --table")
@@ -94,6 +124,14 @@ func runTaskCommand(args []string, out io.Writer) error {
 					return err
 				}
 				item.DayComparison = &comparison
+			}
+			return encoder.Encode(item)
+		}
+	}
+	for _, item := range report.FullTableTasks {
+		if item.SourceDatabase == *sourceDB && item.TargetDatabase == *targetDB && item.Table == *table {
+			if *date != "" {
+				return fmt.Errorf("--date comparison requires an hourly-window task with a time field")
 			}
 			return encoder.Encode(item)
 		}

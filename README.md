@@ -14,16 +14,16 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/doris-partition-sync-linu
 Build a self-contained Linux amd64 package on macOS or Linux:
 
 ```bash
-sh deploy/build-package.sh v1.0.7
+sh deploy/build-package.sh v1.0.8
 ```
 
-The resulting `dist/doris-partition-sync-v1.0.7-linux-amd64.tar.gz` contains the static executable, example config, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
+The resulting `dist/doris-partition-sync-v1.0.8-linux-amd64.tar.gz` contains the static executable, example config, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
 
 On the Linux host, extract the package, prepare real config and credentials, then install and start the service:
 
 ```bash
-tar -xzf doris-partition-sync-v1.0.7-linux-amd64.tar.gz
-cd doris-partition-sync-v1.0.7-linux-amd64
+tar -xzf doris-partition-sync-v1.0.8-linux-amd64.tar.gz
+cd doris-partition-sync-v1.0.8-linux-amd64
 cp partition-sync.example.json partition-sync.json
 cp partition-sync.env.example partition-sync.env
 # Edit partition-sync.json and partition-sync.env for your source, target, bucket, and credentials.
@@ -94,6 +94,20 @@ Add a table while the service is running. The source/target database pair must a
 ```
 
 `task status` returns the saved `nextStart` (the first uncommitted hour), current `phase`, pending window, last completed window time, and last error. A new task starts as `queued`; the service then processes each eligible hour in order. To observe service logs, run `journalctl -u doris-partition-sync -f`. Keep the state file and bucket prefix when restarting so committed hours are not replayed. Managed and static hourly modes require separate state files.
+
+For a small table without a useful time column or partitions, add a recurring whole-table overwrite task to the same managed service:
+
+```bash
+/opt/doris-partition-sync/doris-partition-sync task add --mode full-table --interval 1h \
+  --state-file /var/lib/doris-partition-sync/partition-sync-state.db \
+  --source-db source_db --target-db target_db --table small_lookup
+
+/opt/doris-partition-sync/doris-partition-sync task status \
+  --state-file /var/lib/doris-partition-sync/partition-sync-state.db \
+  --source-db source_db --target-db target_db --table small_lookup
+```
+
+This task runs immediately after registration, then at least one hour after each successful overwrite (the service checks on its configured `interval`). It exports the entire source table to its own OSS prefix, verifies backup objects, and atomically replaces the whole target table with `INSERT OVERWRITE TABLE`. An empty source atomically empties the target. Failures leave the previous target contents intact and retry on the next service scan. `task status` shows `lastSuccessAt`, `nextDueAt`, `phase`, and `lastError`; `task list` includes both task types. The previous full-table backup prefix is cleared before the next attempt, so this is synchronization rather than an archive of every hourly snapshot. Do not use this mode for tables requiring partition-only replacement or for tables too large to export and overwrite hourly. `--date` row comparison is available only for hourly-window tasks with a time field.
 
 To compare source and target row counts for every hour of a particular date, add `--date` and `--config` to `task status`:
 

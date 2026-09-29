@@ -42,6 +42,7 @@ type statusReport struct {
 	TimeZone                     string            `json:"timeZone,omitempty"`
 	HourlyStart                  string            `json:"hourlyStart,omitempty"`
 	HourlyWindows                []statusHourly    `json:"hourlyWindows,omitempty"`
+	FullTableTasks               []statusFullTable `json:"fullTableTasks,omitempty"`
 	KnownTotalPartitions         int               `json:"knownTotalPartitions"`
 	CurrentPartitions            int               `json:"currentPartitions"`
 	ProgressPercent              float64           `json:"progressPercent"`
@@ -53,6 +54,7 @@ type statusReport struct {
 }
 
 type statusHourly struct {
+	Mode           string         `json:"mode,omitempty"`
 	SourceDatabase string         `json:"sourceDatabase"`
 	TargetDatabase string         `json:"targetDatabase"`
 	Table          string         `json:"table"`
@@ -65,6 +67,18 @@ type statusHourly struct {
 	LastSuccessAt  string         `json:"lastSuccessAt,omitempty"`
 	LastError      string         `json:"lastError,omitempty"`
 	DayComparison  *dayComparison `json:"dayComparison,omitempty"`
+}
+
+type statusFullTable struct {
+	Mode           string `json:"mode"`
+	SourceDatabase string `json:"sourceDatabase"`
+	TargetDatabase string `json:"targetDatabase"`
+	Table          string `json:"table"`
+	Interval       string `json:"interval"`
+	Phase          string `json:"phase"`
+	LastSuccessAt  string `json:"lastSuccessAt,omitempty"`
+	NextDueAt      string `json:"nextDueAt,omitempty"`
+	LastError      string `json:"lastError,omitempty"`
 }
 
 func readStatus(path string) (statusReport, error) {
@@ -122,7 +136,7 @@ func readStatus(path string) (statusReport, error) {
 			if err := rows.Scan(&item.SourceDatabase, &item.TargetDatabase, &item.Table, &item.TimeField, &item.Start, &item.TimeZone, &item.LastError, &item.LastSuccessAt, &raw); err != nil {
 				return report, err
 			}
-			item.NextStart, item.Phase = item.Start, "queued"
+			item.Mode, item.NextStart, item.Phase = "hourly-window", item.Start, "queued"
 			if raw.Valid {
 				var entry hourlyState
 				if err := json.Unmarshal([]byte(raw.String), &entry); err != nil {
@@ -141,7 +155,40 @@ func readStatus(path string) (statusReport, error) {
 			}
 			report.HourlyWindows = append(report.HourlyWindows, item)
 		}
-		return report, rows.Err()
+		if err := rows.Err(); err != nil {
+			return report, err
+		}
+		rows.Close()
+		var fullTableExists int
+		if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='full_table_task'").Scan(&fullTableExists); err != nil {
+			return report, err
+		}
+		if fullTableExists == 0 {
+			return report, nil
+		}
+		fullRows, err := db.Query(`SELECT source_db,target_db,table_name,interval_seconds,phase,last_error,last_success_at
+			FROM full_table_task ORDER BY source_db,target_db,table_name`)
+		if err != nil {
+			return report, err
+		}
+		defer fullRows.Close()
+		for fullRows.Next() {
+			var item statusFullTable
+			var seconds int64
+			if err := fullRows.Scan(&item.SourceDatabase, &item.TargetDatabase, &item.Table, &seconds, &item.Phase, &item.LastError, &item.LastSuccessAt); err != nil {
+				return report, err
+			}
+			item.Mode, item.Interval = "full-table", (time.Duration(seconds) * time.Second).String()
+			if item.LastSuccessAt != "" {
+				last, err := time.Parse(time.RFC3339Nano, item.LastSuccessAt)
+				if err != nil {
+					return report, err
+				}
+				item.NextDueAt = last.Add(time.Duration(seconds) * time.Second).Format(time.RFC3339Nano)
+			}
+			report.FullTableTasks = append(report.FullTableTasks, item)
+		}
+		return report, fullRows.Err()
 	}
 	if report.Mode == "hourly-window" {
 		rows, err := db.Query("SELECT source_db, target_db, table_name, state_json FROM hourly_state ORDER BY source_db, target_db, table_name")
