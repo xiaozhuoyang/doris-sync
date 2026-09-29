@@ -70,15 +70,16 @@ type statusHourly struct {
 }
 
 type statusFullTable struct {
-	Mode           string `json:"mode"`
-	SourceDatabase string `json:"sourceDatabase"`
-	TargetDatabase string `json:"targetDatabase"`
-	Table          string `json:"table"`
-	Interval       string `json:"interval"`
-	Phase          string `json:"phase"`
-	LastSuccessAt  string `json:"lastSuccessAt,omitempty"`
-	NextDueAt      string `json:"nextDueAt,omitempty"`
-	LastError      string `json:"lastError,omitempty"`
+	Mode           string               `json:"mode"`
+	SourceDatabase string               `json:"sourceDatabase"`
+	TargetDatabase string               `json:"targetDatabase"`
+	Table          string               `json:"table"`
+	Interval       string               `json:"interval"`
+	Phase          string               `json:"phase"`
+	LastSuccessAt  string               `json:"lastSuccessAt,omitempty"`
+	NextDueAt      string               `json:"nextDueAt,omitempty"`
+	LastError      string               `json:"lastError,omitempty"`
+	Comparison     *fullTableComparison `json:"comparison,omitempty"`
 }
 
 func readStatus(path string) (statusReport, error) {

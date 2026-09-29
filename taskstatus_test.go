@@ -2,10 +2,26 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestFullTableComparisonOutput(t *testing.T) {
+	item := statusFullTable{Mode: "full-table", Comparison: &fullTableComparison{
+		SourceRows: 12, TargetRows: 10, Difference: -2,
+	}}
+	data, err := json.Marshal(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"sourceRows":12`, `"targetRows":10`, `"difference":-2`} {
+		if !strings.Contains(string(data), expected) {
+			t.Fatalf("missing %s in %s", expected, data)
+		}
+	}
+}
 
 func TestBuildDayComparison(t *testing.T) {
 	var source, target [24]int64

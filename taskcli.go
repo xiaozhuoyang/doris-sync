@@ -133,6 +133,33 @@ func runTaskCommand(args []string, out io.Writer) error {
 			if *date != "" {
 				return fmt.Errorf("--date comparison requires an hourly-window task with a time field")
 			}
+			if *configFile != "" {
+				opts, err := loadOptions(*configFile)
+				if err != nil {
+					return err
+				}
+				if !opts.ManagedTasks {
+					return fmt.Errorf("configuration must enable managedTasks")
+				}
+				allowed := false
+				for _, pair := range opts.Databases {
+					if pair.Source == *sourceDB && pair.Target == *targetDB {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					return fmt.Errorf("database mapping %s -> %s is not in configuration", *sourceDB, *targetDB)
+				}
+				metadataTimeout, _ := time.ParseDuration(opts.MetadataTimeout)
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+				defer cancel()
+				comparison, err := compareFullTable(ctx, opts.Source, opts.Target, metadataTimeout, item)
+				if err != nil {
+					return err
+				}
+				item.Comparison = &comparison
+			}
 			return encoder.Encode(item)
 		}
 	}

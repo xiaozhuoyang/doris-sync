@@ -23,6 +23,49 @@ type dayComparison struct {
 	Hours       []hourComparison `json:"hours"`
 }
 
+type fullTableComparison struct {
+	SourceRows int64 `json:"sourceRows"`
+	TargetRows int64 `json:"targetRows"`
+	Difference int64 `json:"difference"`
+}
+
+func compareFullTable(ctx context.Context, source, target Endpoint, metadataTimeout time.Duration, task statusFullTable) (fullTableComparison, error) {
+	sourceDB, err := openDatabase(ctx, source, metadataTimeout)
+	if err != nil {
+		return fullTableComparison{}, fmt.Errorf("connect source: %w", err)
+	}
+	defer sourceDB.close()
+	targetDB, err := openDatabase(ctx, target, metadataTimeout)
+	if err != nil {
+		return fullTableComparison{}, fmt.Errorf("connect target: %w", err)
+	}
+	defer targetDB.close()
+	sourceRows, err := countTableRows(ctx, sourceDB, task.SourceDatabase, task.Table)
+	if err != nil {
+		return fullTableComparison{}, fmt.Errorf("count source rows: %w", err)
+	}
+	targetRows, err := countTableRows(ctx, targetDB, task.TargetDatabase, task.Table)
+	if err != nil {
+		return fullTableComparison{}, fmt.Errorf("count target rows: %w", err)
+	}
+	return fullTableComparison{SourceRows: sourceRows, TargetRows: targetRows, Difference: targetRows - sourceRows}, nil
+}
+
+func countTableRows(ctx context.Context, db *database, databaseName, table string) (int64, error) {
+	rows, err := db.query(ctx, "SELECT COUNT(*) AS row_count FROM "+qtable(databaseName, table))
+	if err != nil {
+		return 0, err
+	}
+	if len(rows) != 1 {
+		return 0, fmt.Errorf("expected one count row, got %d", len(rows))
+	}
+	count, err := strconv.ParseInt(rows[0]["rowcount"], 10, 64)
+	if err != nil || count < 0 {
+		return 0, fmt.Errorf("invalid row_count %q", rows[0]["rowcount"])
+	}
+	return count, nil
+}
+
 func compareTaskDay(ctx context.Context, source, target Endpoint, metadataTimeout time.Duration, task statusHourly, date string) (dayComparison, error) {
 	loc, err := time.LoadLocation(task.TimeZone)
 	if err != nil {
