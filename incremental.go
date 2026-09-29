@@ -194,25 +194,8 @@ func (s *syncer) resumeDelta(ctx context.Context, pair DatabasePair, table strin
 		return fmt.Errorf("delta backup objects changed; refusing import")
 	}
 	if delta.ImportStarted {
-		status, err := s.loadStatus(ctx, pair.Target, delta.Label)
-		if err != nil {
-			return err
-		}
-		switch strings.ToUpper(status) {
-		case "FINISHED":
-			return s.finishDelta(entry, delta, pair, table, part, summary)
-		case "CANCELLED":
-			delta.Attempt++
-			delta.Label = deltaLabel(stateKey(pair.Source, pair.Target, table, part.Name), delta.From, delta.To, delta.SourceIdentity, delta.Attempt)
-			delta.ImportStarted = false
-			if err := s.savePartitionState(pair, table, part); err != nil {
-				return err
-			}
-		case "PENDING", "ETL", "LOADING", "COMMITTED":
-			return fmt.Errorf("delta import label %s is still %s", delta.Label, status)
-		default:
-			return fmt.Errorf("delta import label %s has no conclusive status (%q); manual verification required", delta.Label, status)
-		}
+		// Replaying an append after a lost SQL result could duplicate committed rows.
+		return fmt.Errorf("delta import %s outcome is unknown after interruption; verify target partition %s before retrying", delta.Label, part.Name)
 	}
 	if !delta.ImportStarted {
 		parts, err := s.source.partitions(ctx, pair.Source, table)
@@ -235,27 +218,9 @@ func (s *syncer) resumeDelta(ctx context.Context, pair DatabasePair, table strin
 	uri := s.store.uri(delta.Prefix) + "*.parquet"
 	s.logger.Printf("DELTA_IMPORT_START database=%s table=%s partition=%s label=%s files=%d", pair.Target, table, part.Name, delta.Label, len(delta.Objects))
 	if err := s.target.exec(ctx, importLabeledSQL(pair.Target, table, uri, columns, delta.Label, s.options.S3)); err != nil {
-		return fmt.Errorf("delta import label %s: %w", delta.Label, err)
+		return fmt.Errorf("delta import label %s returned an error; outcome must be verified before retrying: %w", delta.Label, err)
 	}
-	status, err := s.loadStatus(ctx, pair.Target, delta.Label)
-	if err != nil {
-		return err
-	}
-	if strings.EqualFold(status, "FINISHED") {
-		return s.finishDelta(entry, delta, pair, table, part, summary)
-	}
-	return fmt.Errorf("delta import label %s returned but load status is %s; will check again", delta.Label, status)
-}
-
-func (s *syncer) loadStatus(ctx context.Context, db, label string) (string, error) {
-	rows, err := s.target.query(ctx, "SHOW LOAD FROM "+ident(db)+" WHERE LABEL = "+sqlLiteral(label))
-	if err != nil {
-		return "", err
-	}
-	if len(rows) != 1 {
-		return "", fmt.Errorf("SHOW LOAD label %s returned %d rows; manual verification required", label, len(rows))
-	}
-	return rows[0]["state"], nil
+	return s.finishDelta(entry, delta, pair, table, part, summary)
 }
 
 func (s *syncer) finishDelta(entry *partitionState, delta *deltaState, pair DatabasePair, table string, part partition, summary *stats) error {

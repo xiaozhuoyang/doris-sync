@@ -402,25 +402,8 @@ func (s *syncer) syncHourlyWindow(ctx context.Context, task hourlyTask, columns 
 		return fmt.Errorf("hourly backup files changed for %s to %s", from, to)
 	}
 	if p.ImportStarted {
-		status, err := s.loadStatus(ctx, pair.Target, p.Label)
-		if err != nil {
-			return err
-		}
-		switch strings.ToUpper(status) {
-		case "FINISHED":
-			return s.finishHourly(pair, table, entry)
-		case "CANCELLED":
-			p.Attempt++
-			p.Label = deltaLabel(stateKey(pair.Source, pair.Target, table, "hourly"), from, to, p.Prefix, p.Attempt)
-			p.ImportStarted = false
-			if err := s.state.saveHourly(pair, table, entry); err != nil {
-				return err
-			}
-		case "PENDING", "ETL", "LOADING", "COMMITTED":
-			return fmt.Errorf("hourly load %s is still %s", p.Label, status)
-		default:
-			return fmt.Errorf("hourly load %s has inconclusive status %q; manual check required", p.Label, status)
-		}
+		// A prior process may have committed before it could save the checkpoint.
+		return fmt.Errorf("hourly import %s outcome is unknown after interruption; verify target rows for %s to %s before retrying", p.Label, from, to)
 	}
 	p.ImportStarted = true
 	if err := s.state.saveHourly(pair, table, entry); err != nil {
@@ -428,14 +411,7 @@ func (s *syncer) syncHourlyWindow(ctx context.Context, task hourlyTask, columns 
 	}
 	s.logger.Printf("HOURLY_IMPORT_START database=%s table=%s from=%s to=%s files=%d label=%s", pair.Target, table, from, to, len(p.Objects), p.Label)
 	if err := s.target.exec(ctx, importLabeledSQL(pair.Target, table, s.store.uri(p.Prefix)+"*.parquet", columns, p.Label, s.options.S3)); err != nil {
-		return fmt.Errorf("hourly import %s: %w", p.Label, err)
-	}
-	status, err := s.loadStatus(ctx, pair.Target, p.Label)
-	if err != nil {
-		return err
-	}
-	if !strings.EqualFold(status, "FINISHED") {
-		return fmt.Errorf("hourly import %s returned but status is %s", p.Label, status)
+		return fmt.Errorf("hourly import %s returned an error; outcome must be verified before retrying: %w", p.Label, err)
 	}
 	return s.finishHourly(pair, table, entry)
 }
