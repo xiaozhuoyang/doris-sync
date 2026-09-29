@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
 
 func runTaskCommand(args []string, out io.Writer) error {
@@ -19,6 +21,8 @@ func runTaskCommand(args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("task "+command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	stateFile := flags.String("state-file", "partition-sync-state.db", "SQLite state file")
+	configFile := flags.String("config", "", "configuration file for live row comparison")
+	date := flags.String("date", "", "compare source and target rows for YYYY-MM-DD")
 	sourceDB := flags.String("source-db", "", "source database")
 	targetDB := flags.String("target-db", "", "target database")
 	table := flags.String("table", "", "table name")
@@ -30,6 +34,9 @@ func runTaskCommand(args []string, out io.Writer) error {
 	}
 	if len(flags.Args()) != 0 {
 		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if *date != "" && (command != "status" || *configFile == "") {
+		return fmt.Errorf("--date requires task status and --config")
 	}
 	if command == "add" {
 		state, err := openState(*stateFile)
@@ -61,6 +68,33 @@ func runTaskCommand(args []string, out io.Writer) error {
 	}
 	for _, item := range report.HourlyWindows {
 		if item.SourceDatabase == *sourceDB && item.TargetDatabase == *targetDB && item.Table == *table {
+			if *date != "" {
+				opts, err := loadOptions(*configFile)
+				if err != nil {
+					return err
+				}
+				if !opts.ManagedTasks {
+					return fmt.Errorf("configuration must enable managedTasks")
+				}
+				allowed := false
+				for _, pair := range opts.Databases {
+					if pair.Source == *sourceDB && pair.Target == *targetDB {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					return fmt.Errorf("database mapping %s -> %s is not in configuration", *sourceDB, *targetDB)
+				}
+				metadataTimeout, _ := time.ParseDuration(opts.MetadataTimeout)
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+				defer cancel()
+				comparison, err := compareTaskDay(ctx, opts.Source, opts.Target, metadataTimeout, item, *date)
+				if err != nil {
+					return err
+				}
+				item.DayComparison = &comparison
+			}
 			return encoder.Encode(item)
 		}
 	}

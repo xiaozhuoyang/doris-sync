@@ -14,16 +14,16 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/doris-partition-sync-linu
 Build a self-contained Linux amd64 package on macOS or Linux:
 
 ```bash
-sh deploy/build-package.sh v1.0.6
+sh deploy/build-package.sh v1.0.7
 ```
 
-The resulting `dist/doris-partition-sync-v1.0.6-linux-amd64.tar.gz` contains the static executable, example config, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
+The resulting `dist/doris-partition-sync-v1.0.7-linux-amd64.tar.gz` contains the static executable, example config, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
 
 On the Linux host, extract the package, prepare real config and credentials, then install and start the service:
 
 ```bash
-tar -xzf doris-partition-sync-v1.0.6-linux-amd64.tar.gz
-cd doris-partition-sync-v1.0.6-linux-amd64
+tar -xzf doris-partition-sync-v1.0.7-linux-amd64.tar.gz
+cd doris-partition-sync-v1.0.7-linux-amd64
 cp partition-sync.example.json partition-sync.json
 cp partition-sync.env.example partition-sync.env
 # Edit partition-sync.json and partition-sync.env for your source, target, bucket, and credentials.
@@ -94,6 +94,25 @@ Add a table while the service is running. The source/target database pair must a
 ```
 
 `task status` returns the saved `nextStart` (the first uncommitted hour), current `phase`, pending window, last completed window time, and last error. A new task starts as `queued`; the service then processes each eligible hour in order. To observe service logs, run `journalctl -u doris-partition-sync -f`. Keep the state file and bucket prefix when restarting so committed hours are not replayed. Managed and static hourly modes require separate state files.
+
+To compare source and target row counts for every hour of a particular date, add `--date` and `--config` to `task status`:
+
+```bash
+./doris-partition-sync task status --state-file ./partition-sync-state.db \
+  --config ./partition-sync.json --source-db source_db --target-db target_db \
+  --table orders --date 2026-09-29
+```
+
+The `dayComparison` JSON includes all 24 hours, zeros for empty hours, daily totals, and `difference = targetRows - sourceRows`. It runs one grouped count query against each database, using the task's time column and time zone. This is a live full-day count and may be expensive on large tables. Hours at or after `nextStart` have not necessarily been synchronized; a nonzero difference there is not by itself a failure. For an installed service, run the command as the service user with access to its SQLite file and provide the password environment variables from `partition-sync.env`.
+
+To choose compute clusters independently for export and import, set `cluster` on each connection in `partition-sync.json`:
+
+```json
+"source": {"host": "source-fe", "port": 9030, "user": "root", "password": "${SOURCE_PASSWORD}", "cluster": "export_cluster"},
+"target": {"host": "target-fe", "port": 9030, "user": "root", "password": "${TARGET_PASSWORD}", "cluster": "import_cluster"}
+```
+
+The tool executes `USE @cluster` on each connection before metadata, OUTFILE, import, or live status queries. Omit `cluster` to use the FE's default cluster. Cluster selection is per source/target connection, not per table task; restart the service after changing its config.
 
 At 10:00 local time, the newest eligible window is `[08:00, 09:00)`. The tool processes all eligible hours from its saved `nextStart` in order; it never skips backlog to jump to the newest hour. Each window exports rows satisfying `time_field >= start AND time_field < end` across the table, then performs a labeled import. Empty windows are checkpointed too. The next start is persisted only after successful import verification, and an interrupted import is reconciled through `SHOW LOAD` before advancing. The field must be `DATETIME`; use a fixed-offset time zone such as `UTC` or `Asia/Shanghai`. The target must not already contain rows in the chosen initial time range, or append imports will duplicate them.
 

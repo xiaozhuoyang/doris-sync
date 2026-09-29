@@ -53,17 +53,18 @@ type statusReport struct {
 }
 
 type statusHourly struct {
-	SourceDatabase string `json:"sourceDatabase"`
-	TargetDatabase string `json:"targetDatabase"`
-	Table          string `json:"table"`
-	TimeField      string `json:"timeField,omitempty"`
-	Start          string `json:"start,omitempty"`
-	TimeZone       string `json:"timeZone,omitempty"`
-	NextStart      string `json:"nextStart"`
-	PendingEnd     string `json:"pendingEnd,omitempty"`
-	Phase          string `json:"phase"`
-	LastSuccessAt  string `json:"lastSuccessAt,omitempty"`
-	LastError      string `json:"lastError,omitempty"`
+	SourceDatabase string         `json:"sourceDatabase"`
+	TargetDatabase string         `json:"targetDatabase"`
+	Table          string         `json:"table"`
+	TimeField      string         `json:"timeField,omitempty"`
+	Start          string         `json:"start,omitempty"`
+	TimeZone       string         `json:"timeZone,omitempty"`
+	NextStart      string         `json:"nextStart"`
+	PendingEnd     string         `json:"pendingEnd,omitempty"`
+	Phase          string         `json:"phase"`
+	LastSuccessAt  string         `json:"lastSuccessAt,omitempty"`
+	LastError      string         `json:"lastError,omitempty"`
+	DayComparison  *dayComparison `json:"dayComparison,omitempty"`
 }
 
 func readStatus(path string) (statusReport, error) {
