@@ -423,10 +423,33 @@ func (s *syncer) finishHourly(pair DatabasePair, table string, entry *hourlyStat
 	}
 	completed := *entry
 	completed.Next, completed.Pending = p.To, nil
-	if err := s.state.saveHourly(pair, table, &completed); err != nil {
+	if err := s.state.saveCompletedHourly(pair, table, &completed); err != nil {
 		return err
 	}
 	*entry = completed
 	s.logger.Printf("HOURLY_DONE database=%s table=%s next=%s", pair.Source, table, entry.Next)
 	return nil
+}
+
+func (s *syncState) saveCompletedHourly(pair DatabasePair, table string, entry *hourlyState) error {
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return persistenceError(err)
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`INSERT INTO hourly_state(source_db,target_db,table_name,state_json) VALUES(?,?,?,?)
+		ON CONFLICT(source_db,target_db,table_name) DO UPDATE SET state_json=excluded.state_json`, pair.Source, pair.Target, table, string(raw))
+	if err != nil {
+		return persistenceError(err)
+	}
+	_, err = tx.Exec(`UPDATE hourly_task SET last_error='',last_success_at=?
+		WHERE source_db=? AND target_db=? AND table_name=?`, time.Now().UTC().Format(time.RFC3339Nano), pair.Source, pair.Target, table)
+	if err != nil {
+		return persistenceError(err)
+	}
+	return persistenceError(tx.Commit())
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"path/filepath"
@@ -95,5 +96,46 @@ func TestHourlyCheckpointContinuity(t *testing.T) {
 	report, err := readStatus(path)
 	if err != nil || report.Mode != "hourly-window" || len(report.HourlyWindows) != 1 || report.HourlyWindows[0].NextStart != "2026-09-29 09:00:00" {
 		t.Fatalf("wrong status: %+v, %v", report, err)
+	}
+}
+
+func TestManagedHourlyCompletionClearsStaleError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	state, err := openState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.close()
+	pair := DatabasePair{Source: "src", Target: "dst"}
+	task := hourlyTask{Pair: pair, Table: "events", TimeField: "event_time", Start: "2026-09-29 08:00:00", TimeZone: "UTC"}
+	if err := state.addHourlyTask(task); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := state.loadHourly(pair, task.Table, task.Start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.Pending = &hourlyPending{From: task.Start, To: "2026-09-29 09:00:00"}
+	if err := state.saveHourly(pair, task.Table, entry); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.saveHourlyTaskResult(task, 0, fmt.Errorf("previous failure")); err != nil {
+		t.Fatal(err)
+	}
+	s := &syncer{state: state, logger: log.New(io.Discard, "", 0)}
+	if err := s.finishHourly(pair, task.Table, entry); err != nil {
+		t.Fatal(err)
+	}
+	entry.Pending = &hourlyPending{From: entry.Next, To: "2026-09-29 10:00:00", BackupReady: true}
+	if err := state.saveHourly(pair, task.Table, entry); err != nil {
+		t.Fatal(err)
+	}
+	report, err := readStatus(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := report.HourlyWindows[0]
+	if got.Phase != "importing" || got.LastError != "" || got.LastSuccessAt == "" || got.NextStart != "2026-09-29 09:00:00" {
+		t.Fatalf("stale task status after completed window: %+v", got)
 	}
 }

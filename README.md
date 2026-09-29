@@ -93,7 +93,7 @@ Add a table while the service is running. The source/target database pair must a
   --state-file /var/lib/doris-partition-sync/partition-sync-state.db
 ```
 
-`task status` returns the saved `nextStart` (the first uncommitted hour), current `phase`, pending window, last completed window time, and last error. A new task starts as `queued`; the service then processes each eligible hour in order. To observe service logs, run `journalctl -u doris-partition-sync -f`. Keep the state file and bucket prefix when restarting so committed hours are not replayed. Managed and static hourly modes require separate state files.
+`task status` returns the saved `nextStart` (the first uncommitted hour), current `phase`, pending window, last completed window time, and last error. A new task starts as `queued`; the service then processes each eligible hour in order. Each completed window updates `lastSuccessAt` and clears any previous error, even while the service continues through a backlog. To observe service logs, run `journalctl -u doris-partition-sync -f`. Keep the state file and bucket prefix when restarting so committed hours are not replayed. Managed and static hourly modes require separate state files.
 
 For a small table without a useful time column or partitions, add a recurring whole-table overwrite task to the same managed service:
 
