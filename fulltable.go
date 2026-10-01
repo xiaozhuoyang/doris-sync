@@ -118,8 +118,8 @@ func (s *syncer) syncFullTable(ctx context.Context, task fullTableTask, targetTa
 	if err != nil {
 		return err
 	}
-	if !sameColumns(cols, targetCols) {
-		return fmt.Errorf("target schema columns differ from source")
+	if err := validateTargetColumns(cols, targetCols); err != nil {
+		return err
 	}
 	columns := make([]string, len(cols))
 	for i, col := range cols {

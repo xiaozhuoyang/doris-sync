@@ -293,8 +293,8 @@ func (s *syncer) syncHourlyTable(ctx context.Context, task hourlyTask) (int, err
 	if err != nil {
 		return 0, err
 	}
-	if !sameColumns(cols, targetCols) {
-		return 0, fmt.Errorf("target schema columns differ from source")
+	if err := validateTargetColumns(cols, targetCols); err != nil {
+		return 0, err
 	}
 	columnJSON, _ := json.Marshal(cols)
 	hash := sha256.Sum256(columnJSON)

@@ -42,35 +42,69 @@ func main() {
 	}
 	configFile := flag.String("config", "partition-sync.json", "configuration file")
 	status := flag.Bool("status", false, "print the current SQLite checkpoint as JSON without connecting to SelectDB")
-	statusStateFile := flag.String("state-file", "partition-sync-state.db", "SQLite state file for --status")
+	stateFile := flag.String("state-file", "", "override SQLite state file in config, or use with --status")
+	s3Prefix := flag.String("s3-prefix", "", "dedicated OSS/S3 prefix for --force-overwrite")
 	once := flag.Bool("once", false, "run one synchronization cycle even when interval is configured")
 	checkInterval := flag.String("check-interval", "", "sync scan interval (default 1h)")
 	syncMode := flag.String("sync-mode", "overwrite", "sync mode: overwrite, time-window, or hourly-window")
 	timeField := flag.String("time-field", "", "DATE/DATETIME column required for time-window and hourly-window modes")
 	windowStart := flag.String("window-start", "", "first hourly window start, YYYY-MM-DD HH:00:00; overrides hourlyStart in config")
 	partitions := flag.String("partitions", "", "comma-separated exact source partition names; overrides config partition filters")
+	table := flag.String("table", "", "exact table name for --force-overwrite")
+	forceOverwrite := flag.Bool("force-overwrite", false, "re-export and overwrite selected partitions even when versions match; requires --once")
 	flag.Parse()
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds)
 	if *status {
-		if err := printStatus(*statusStateFile, os.Stdout); err != nil {
+		path := *stateFile
+		if path == "" {
+			path = "partition-sync-state.db"
+		}
+		if err := printStatus(path, os.Stdout); err != nil {
 			logger.Printf("FATAL error=%q", err)
 			os.Exit(1)
 		}
 		return
 	}
-	if err := run(*configFile, *once, *checkInterval, *syncMode, *timeField, *partitions, *windowStart, logger); err != nil {
+	if err := run(*configFile, *once, *checkInterval, *syncMode, *timeField, *partitions, *windowStart, *stateFile, *s3Prefix, *table, *forceOverwrite, logger); err != nil {
 		logger.Printf("FATAL error=%q", err)
 		os.Exit(1)
 	}
 }
 
-func run(configFile string, once bool, checkInterval, syncMode, timeField, partitions, windowStart string, logger *log.Logger) error {
+func run(configFile string, once bool, checkInterval, syncMode, timeField, partitions, windowStart, stateFile, s3Prefix, table string, forceOverwrite bool, logger *log.Logger) error {
 	if syncMode != "overwrite" && syncMode != "time-window" && syncMode != "hourly-window" {
 		return fmt.Errorf("--sync-mode must be overwrite, time-window, or hourly-window")
 	}
 	o, err := loadOptions(configFile)
 	if err != nil {
 		return err
+	}
+	if forceOverwrite {
+		if stateFile == "" || s3Prefix == "" {
+			return fmt.Errorf("--force-overwrite requires --state-file and --s3-prefix dedicated to this run")
+		}
+		configuredState, err := filepath.Abs(o.StateFile)
+		if err != nil {
+			return err
+		}
+		selectedState, err := filepath.Abs(stateFile)
+		if err != nil {
+			return err
+		}
+		configuredPrefix := strings.Trim(o.S3.Prefix, "/")
+		selectedPrefix := strings.Trim(s3Prefix, "/")
+		if configuredState == selectedState || configuredPrefix == selectedPrefix || strings.HasPrefix(configuredPrefix, selectedPrefix+"/") || strings.HasPrefix(selectedPrefix, configuredPrefix+"/") {
+			return fmt.Errorf("--force-overwrite state file and S3 prefix must differ from the service configuration")
+		}
+		if selectedPrefix == "" {
+			return fmt.Errorf("--s3-prefix must be a nonempty dedicated directory")
+		}
+		o.ManagedTasks = false
+		o.HourlyStart = ""
+		o.S3.Prefix = s3Prefix
+	}
+	if stateFile != "" {
+		o.StateFile = stateFile
 	}
 	if syncMode == "time-window" && strings.TrimSpace(timeField) == "" {
 		return fmt.Errorf("--time-field is required in time-window mode")
@@ -112,6 +146,16 @@ func run(configFile string, once bool, checkInterval, syncMode, timeField, parti
 		o.Partitions = names
 		o.IncludePartitions = ""
 	}
+	if forceOverwrite {
+		if err := validateForcedOverwrite(once, syncMode, table, o); err != nil {
+			return err
+		}
+		o.ForceOverwrite = true
+		o.IncludeTables = "^" + regexp.QuoteMeta(table) + "$"
+		o.ExcludeTables = ""
+	} else if table != "" || s3Prefix != "" {
+		return fmt.Errorf("--table and --s3-prefix require --force-overwrite")
+	}
 	metadataTimeout, _ := time.ParseDuration(o.MetadataTimeout)
 	if checkInterval != "" {
 		d, err := time.ParseDuration(checkInterval)
@@ -147,6 +191,13 @@ func run(configFile string, once bool, checkInterval, syncMode, timeField, parti
 		return fmt.Errorf("connect target: %w", err)
 	}
 	defer target.close()
+	if err := checkConnection(ctx, source); err != nil {
+		return fmt.Errorf("source SELECT 1 failed: %w", err)
+	}
+	if err := checkConnection(ctx, target); err != nil {
+		return fmt.Errorf("target SELECT 1 failed: %w", err)
+	}
+	logger.Printf("CONNECTION_CHECK source=ok target=ok")
 	store, err := openObjectStore(ctx, o.S3)
 	if err != nil {
 		return err
@@ -210,6 +261,22 @@ func run(configFile string, once bool, checkInterval, syncMode, timeField, parti
 	}
 }
 
+func validateForcedOverwrite(once bool, mode, table string, o Options) error {
+	if !once || mode != "overwrite" {
+		return fmt.Errorf("--force-overwrite requires --sync-mode overwrite --once")
+	}
+	if table == "" || strings.TrimSpace(table) != table {
+		return fmt.Errorf("--force-overwrite requires an exact --table name")
+	}
+	if len(o.Partitions) == 0 || o.IncludePartitions != "" {
+		return fmt.Errorf("--force-overwrite requires exact --partitions names")
+	}
+	if len(o.Databases) != 1 {
+		return fmt.Errorf("--force-overwrite requires exactly one source/target database mapping")
+	}
+	return nil
+}
+
 func (s *syncer) cycle(ctx context.Context) error {
 	var summary stats
 	type tablePlan struct {
@@ -249,6 +316,9 @@ func (s *syncer) cycle(ctx context.Context) error {
 			if err != nil {
 				summary.failed++
 				s.logger.Printf("TABLE_FAILED database=%s table=%s error=%q", mapping.Source, table, err)
+				if s.options.ForceOverwrite {
+					return fmt.Errorf("preflight %s.%s: %w", mapping.Source, table, err)
+				}
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
@@ -274,6 +344,9 @@ func (s *syncer) cycle(ctx context.Context) error {
 			if err := s.syncTable(ctx, plan.mapping, table, plan.targetTables, &summary); err != nil {
 				summary.failed++
 				s.logger.Printf("TABLE_FAILED database=%s table=%s error=%q", plan.mapping.Source, table, err)
+				if s.options.ForceOverwrite {
+					return fmt.Errorf("forced overwrite %s.%s: %w", plan.mapping.Source, table, err)
+				}
 				if errors.Is(err, errStatePersistence) {
 					return err
 				}
@@ -305,6 +378,9 @@ func (s *syncer) ensureTargetTable(ctx context.Context, pair DatabasePair, table
 		s.logger.Printf("SKIP_TABLE database=%s table=%s reason=non_olap_table", pair.Source, table)
 		return false, nil
 	}
+	if s.options.ForceOverwrite && !targetTables[table] {
+		return false, fmt.Errorf("target table %s.%s does not exist; forced overwrite will not create it", pair.Target, table)
+	}
 	if !targetTables[table] {
 		createSQL, err := targetDDL(ddl, pair.Target, table)
 		if err != nil {
@@ -316,9 +392,36 @@ func (s *syncer) ensureTargetTable(ctx context.Context, pair DatabasePair, table
 		targetTables[table] = true
 		s.logger.Printf("CREATE_TABLE database=%s table=%s", pair.Target, table)
 	}
+	sourceColumns, err := s.source.columns(ctx, pair.Source, table)
+	if err != nil {
+		return false, err
+	}
+	targetColumns, err := s.target.columns(ctx, pair.Target, table)
+	if err != nil {
+		return false, err
+	}
+	if err := validateTargetColumns(sourceColumns, targetColumns); err != nil {
+		return false, fmt.Errorf("%s.%s: %w", pair.Target, table, err)
+	}
 	parts, err := s.source.partitions(ctx, pair.Source, table)
 	if err != nil {
 		return false, err
+	}
+	if s.options.ForceOverwrite {
+		targetParts, err := s.target.partitions(ctx, pair.Target, table)
+		if err != nil {
+			return false, err
+		}
+		for _, part := range parts {
+			if !s.options.allowsPartition(part.Name) {
+				continue
+			}
+			if _, found, err := matchTargetPartition(part, targetParts); err != nil {
+				return false, err
+			} else if !found {
+				return false, fmt.Errorf("target partition matching source %s is missing; forced overwrite requires an existing target partition", part.Name)
+			}
+		}
 	}
 	for _, part := range parts {
 		s.seenPartitions[part.Name] = true
@@ -465,8 +568,8 @@ func (s *syncer) syncTable(ctx context.Context, pair DatabasePair, table string,
 		if err != nil {
 			return err
 		}
-		if !sameColumns(columns, targetColumns) {
-			return fmt.Errorf("target schema columns differ from source")
+		if err := validateTargetColumns(columns, targetColumns); err != nil {
+			return err
 		}
 	}
 	s.state.Tables[tableKey] = schemaHash
@@ -508,6 +611,9 @@ func (s *syncer) syncTable(ctx context.Context, pair DatabasePair, table string,
 			if errors.Is(err, errStatePersistence) {
 				return err
 			}
+			if s.options.ForceOverwrite {
+				return fmt.Errorf("partition %s: %w", part.Name, err)
+			}
 			partitionErrors = append(partitionErrors, fmt.Errorf("partition %s: %w", part.Name, err))
 			s.logger.Printf("PARTITION_FAILED database=%s table=%s partition=%s error=%q", pair.Source, table, part.Name, err)
 			continue
@@ -529,6 +635,16 @@ func sameColumns(a, b []column) bool {
 	return true
 }
 
+func validateTargetColumns(source, target []column) error {
+	if len(source) != len(target) {
+		return fmt.Errorf("target column count differs from source: source=%d target=%d; existing target table was not changed", len(source), len(target))
+	}
+	if !sameColumns(source, target) {
+		return fmt.Errorf("target column names, order, or types differ from source; existing target table was not changed")
+	}
+	return nil
+}
+
 func (s *syncer) syncPartition(ctx context.Context, pair DatabasePair, table string, part partition, columns []string, ddl string, summary *stats) error {
 	key := stateKey(pair.Source, pair.Target, table, part.Name)
 	identity := sourceIdentity(part)
@@ -537,7 +653,7 @@ func (s *syncer) syncPartition(ctx context.Context, pair DatabasePair, table str
 		entry = &partitionState{}
 		s.state.Partitions[key] = entry
 	}
-	if entry.BackupReady && entry.BackupPrefix != "" && entry.ImportedIdentity == identity && !entry.ImportInProgress {
+	if !s.options.ForceOverwrite && entry.BackupReady && entry.BackupPrefix != "" && entry.ImportedIdentity == identity && !entry.ImportInProgress {
 		if len(entry.Objects) == 0 {
 			summary.unchanged++
 			return nil
@@ -561,7 +677,7 @@ func (s *syncer) syncPartition(ctx context.Context, pair DatabasePair, table str
 	}
 	partitionPrefix := s.store.partitionPrefix(pair.Source, pair.Target, table, part.Name)
 	prefix := entry.BackupPrefix
-	if entry.BackupIdentity != identity || !entry.BackupReady || prefix == "" {
+	if s.options.ForceOverwrite || entry.BackupIdentity != identity || !entry.BackupReady || prefix == "" {
 		var err error
 		prefix, err = backupGenerationPrefix(partitionPrefix)
 		if err != nil {
@@ -638,6 +754,9 @@ func (s *syncer) syncPartition(ctx context.Context, pair DatabasePair, table str
 	}
 	if !exists && !isAutoPartitionDDL(ddl) {
 		return fmt.Errorf("target partition %s missing and table does not use AUTO PARTITION", part.Name)
+	}
+	if s.options.ForceOverwrite && !exists {
+		return fmt.Errorf("target partition matching source %s is missing; forced overwrite requires an existing target partition", part.Name)
 	}
 	entry.ImportInProgress = true
 	entry.UpdatedAt = time.Now()

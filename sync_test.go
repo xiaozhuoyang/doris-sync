@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -8,6 +10,55 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestStartupConnectionCheck(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := checkConnection(context.Background(), &database{db: db}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkConnection(context.Background(), &database{db: db}); err == nil {
+		t.Fatal("closed connection passed SELECT 1 check")
+	}
+}
+
+func TestForcedOverwriteSelection(t *testing.T) {
+	o := Options{Databases: []DatabasePair{{Source: "src", Target: "dst"}}, Partitions: []string{"p1", "p2"}}
+	if err := validateForcedOverwrite(true, "overwrite", "events", o); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateForcedOverwrite(false, "overwrite", "events", o); err == nil {
+		t.Fatal("continuous forced overwrite accepted")
+	}
+	if err := validateForcedOverwrite(true, "hourly-window", "events", o); err == nil {
+		t.Fatal("hourly forced overwrite accepted")
+	}
+	if err := validateForcedOverwrite(true, "overwrite", "events", Options{Databases: o.Databases}); err == nil {
+		t.Fatal("forced overwrite without exact partitions accepted")
+	}
+	if err := validateForcedOverwrite(true, "overwrite", "events", Options{Databases: append(o.Databases, o.Databases[0]), Partitions: o.Partitions}); err == nil {
+		t.Fatal("forced overwrite with multiple database mappings accepted")
+	}
+}
+
+func TestValidateTargetColumnsDoesNotAcceptCountMismatch(t *testing.T) {
+	source := []column{{Name: "id", Type: "BIGINT"}, {Name: "value", Type: "VARCHAR(20)"}}
+	if err := validateTargetColumns(source, source[:1]); err == nil || !strings.Contains(err.Error(), "source=2 target=1") {
+		t.Fatalf("column count mismatch: %v", err)
+	}
+	if err := validateTargetColumns(source, []column{{Name: "id", Type: "BIGINT"}, {Name: "other", Type: "VARCHAR(20)"}}); err == nil {
+		t.Fatal("same count but different column accepted")
+	}
+	if err := validateTargetColumns(source, source); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestTargetDDL(t *testing.T) {
 	ddl := "CREATE TABLE `source_db`.`orders` (\n `id` bigint,\n `dt` date\n) ENGINE=OLAP\nPARTITION BY RANGE(`dt`)\n(\n PARTITION `p202601` VALUES [('2026-01-01'), ('2026-02-01')),\n PARTITION `p202602` VALUES [('2026-02-01'), ('2026-03-01'))\n)\nDISTRIBUTED BY HASH(`id`) BUCKETS 8"

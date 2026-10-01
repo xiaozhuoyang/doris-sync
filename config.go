@@ -53,6 +53,7 @@ type Options struct {
 	HourlyStart       string         `json:"hourlyStart"`
 	TimeZone          string         `json:"timeZone"`
 	ManagedTasks      bool           `json:"managedTasks"`
+	ForceOverwrite    bool           `json:"-"`
 }
 
 func loadOptions(path string) (Options, error) {

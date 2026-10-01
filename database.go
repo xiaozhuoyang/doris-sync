@@ -52,6 +52,19 @@ func openDatabase(ctx context.Context, o Endpoint, metadataTimeout time.Duration
 
 func (d *database) close() { _ = d.db.Close() }
 
+func checkConnection(ctx context.Context, d *database) error {
+	checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	rows, err := d.query(checkCtx, "SELECT 1 AS connection_check")
+	if err != nil {
+		return err
+	}
+	if len(rows) != 1 || rows[0]["connectioncheck"] != "1" {
+		return fmt.Errorf("SELECT 1 returned an unexpected result")
+	}
+	return nil
+}
+
 func (d *database) withConn(ctx context.Context, fn func(*sql.Conn) error) error {
 	conn, err := d.db.Conn(ctx)
 	if err != nil {
