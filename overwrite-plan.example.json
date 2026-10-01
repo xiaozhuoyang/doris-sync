@@ -1,0 +1,16 @@
+{
+  "tables": [
+    {
+      "sourceDatabase": "minimax",
+      "targetDatabase": "minimax_target",
+      "table": "ali_virginia_prod_03",
+      "partitions": ["p20260903160000", "p20260903170000"]
+    },
+    {
+      "sourceDatabase": "minimax",
+      "targetDatabase": "minimax_target",
+      "table": "another_table",
+      "partitions": ["p20260901", "p20260902"]
+    }
+  ]
+}

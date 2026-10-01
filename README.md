@@ -14,16 +14,16 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/doris-partition-sync-linu
 Build a self-contained Linux amd64 package on macOS or Linux:
 
 ```bash
-sh deploy/build-package.sh v1.0.12
+sh deploy/build-package.sh v1.0.13
 ```
 
-The resulting `dist/doris-partition-sync-v1.0.12-linux-amd64.tar.gz` contains the static executable, example config, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
+The resulting `dist/doris-partition-sync-v1.0.13-linux-amd64.tar.gz` contains the static executable, example config, overwrite-plan example, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
 
 On the Linux host, extract the package, prepare real config and credentials, then install and start the service:
 
 ```bash
-tar -xzf doris-partition-sync-v1.0.12-linux-amd64.tar.gz
-cd doris-partition-sync-v1.0.12-linux-amd64
+tar -xzf doris-partition-sync-v1.0.13-linux-amd64.tar.gz
+cd doris-partition-sync-v1.0.13-linux-amd64
 cp partition-sync.example.json partition-sync.json
 cp partition-sync.env.example partition-sync.env
 # Edit partition-sync.json and partition-sync.env for your source, target, bucket, and credentials.
@@ -143,7 +143,7 @@ To select exact source partition names, set `"partitions": ["p20260901000000", "
 
 `--partitions` replaces either config partition filter for that run. In the config, `partitions` and the existing `includePartitions` regex are mutually exclusive. Both initial sync and subsequent visible-version checks honor the selection, while partitions still run oldest first. Exact names not found in any selected source table cause an error instead of a silent no-op. `includeTables` can narrow the selection to one table. Remove the partition filter for whole-database sync. The status command's progress denominator remains the complete partition inventory, not only the selected subset.
 
-For a one-time **forced re-export and partition overwrite** of one existing target table, use exact table and source partition names. The command can reuse the installed managed-service config, but requires a separate SQLite state file and a disjoint S3 prefix. It checks `SELECT 1` on both endpoints (including their configured cluster/session), checks source and target columns, and verifies every selected target partition exists before exporting. It never drops or recreates an existing target table. Source partitions run sequentially in source range order, regardless of input order, and are overwritten even when their visible versions match the saved checkpoint:
+For a one-time **forced re-export and partition overwrite** of one existing target table, use exact table and source partition names. The command can reuse the installed managed-service config, but requires a separate SQLite state file and a disjoint S3 prefix. It checks `SELECT 1` on both endpoints (including their configured cluster/session), checks source and target columns, and checks target partition ranges before exporting. An existing matching target partition is overwritten; if the range is missing on an AUTO PARTITION target, the import creates it. Missing partitions on non-auto-partitioned targets are rejected. It never drops or recreates an existing target table. Source partitions run sequentially in source range order, regardless of input order, and are overwritten even when their visible versions match the saved checkpoint:
 
 ```bash
 ./doris-partition-sync --config ./partition-sync.json --sync-mode overwrite --once \
@@ -151,6 +151,17 @@ For a one-time **forced re-export and partition overwrite** of one existing targ
   --force-overwrite --state-file ./partition-overwrite-state.db \
   --s3-prefix backups/partition-overwrite/run01
 ```
+
+For **multiple tables and partitions**, put them in a separate JSON plan (see `overwrite-plan.example.json`). Each entry supplies `sourceDatabase`, `targetDatabase`, `table`, and an exact `partitions` array. Every database mapping must also exist in the connection config's `databases` list. Run the entire plan with one command:
+
+```bash
+./doris-partition-sync --config ./partition-sync.json --sync-mode overwrite --once \
+  --force-overwrite --overwrite-plan ./overwrite-plan.json \
+  --state-file ./partition-overwrite-state.db \
+  --s3-prefix backups/partition-overwrite/run01
+```
+
+The plan checks **all** source tables, target tables, column layouts, and selected partition ranges before starting the first export. Tables execute in JSON order; partitions within each table execute from oldest range to newest. An error stops the run before later tables. `--overwrite-plan` cannot be combined with `--table`, `--partitions`, or table/partition filters in the connection config. Use a new state file and disjoint S3 prefix for a separate run; retrying the same plan will re-export its selected partitions. The plan file has no credentials.
 
 Do not run this operation concurrently with an hourly task writing the same target table. Stop the hourly service only between import windows; interrupting a synchronous INSERT can leave its outcome unknown. A failed partition is recorded in the separate state file, and the forced run stops before later partitions; inspect `PARTITION_FAILED` before retrying. A forced run refreshes the selected partition backups again when repeated.
 
