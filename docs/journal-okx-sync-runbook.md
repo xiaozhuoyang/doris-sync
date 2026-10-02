@@ -109,22 +109,25 @@ SYNC_MODE=hourly-window
 sudo ./install.sh --config ./partition-sync.json --env ./partition-sync.env
 sudo systemctl status doris-partition-sync --no-pager
 sudo journalctl -u doris-partition-sync -n 50 --no-pager -o cat
+sudo -u doris-partition-sync /opt/doris-partition-sync/doris-partition-sync task list \
+  --state-file /var/lib/doris-partition-sync/partition-sync-state.db
 ```
 
-安装脚本会启动 systemd 服务；此时尚未加任务，服务只会周期扫描并打印 `tasks=0`。配置安装到 `/etc/doris-partition-sync/`，程序位于 `/opt/doris-partition-sync/`，常驻 SQLite 状态位于 `/var/lib/doris-partition-sync/`。
+安装脚本会自动启动 systemd 服务。**全新环境尚未添加任务时，`task list` 应返回 `[]`，服务只会周期扫描并打印 `tasks=0`，不会备份或导入任何表；不需要先停止服务。** 配置安装到 `/etc/doris-partition-sync/`，程序位于 `/opt/doris-partition-sync/`，常驻 SQLite 状态位于 `/var/lib/doris-partition-sync/`。
 
 ## 4. 执行一次性分区覆盖
 
-如果已有小时任务正在写这些目标表，先等当前 `HOURLY_IMPORT_START` 对应 `HOURLY_DONE`，再停服务；不要在 SQL 执行中途强停。对于新装且没有任务的服务，也可以先停掉，使维修窗口行为一致。
+**第一步：仅安装覆盖计划，不会执行同步。** 在安装包解压目录运行：
 
 ```bash
-sudo systemctl stop doris-partition-sync
 sudo install -m 0640 -o root -g doris-partition-sync \
   ./overwrite-plan-journal-okx-20261002.json \
   /etc/doris-partition-sync/overwrite-plan-journal-okx-20261002.json
 ```
 
-先做一张表/一个分区的试运行更稳妥：复制计划 JSON，保留一个 `tables` 项和一个 `partitions` 项，使用新的测试 state 文件和 OSS 前缀。确认结果后，再运行完整 134 分区计划。正式后台命令：
+`systemctl stop` 仅适用于**已经添加小时任务**的环境：若有任务正在写这些目标表，须先等当前 `HOURLY_IMPORT_START` 对应 `HOURLY_DONE`，再停服务；不要在 SQL 执行中途强停。全新环境 `tasks=0` 时跳过此操作。
+
+**第二步：执行一次性覆盖。下面这条命令会真正改写目标分区数据。** 建议先复制计划 JSON，仅保留一张表的一个分区，配合独立的测试 state 文件和 OSS 前缀验证；确认无误后，再执行完整 134 分区计划。正式后台命令：
 
 ```bash
 sudo -u doris-partition-sync sh -c '
@@ -156,12 +159,13 @@ sudo -u doris-partition-sync /opt/doris-partition-sync/doris-partition-sync \
 
 ## 5. 启动小时增量任务
 
-覆盖完成、校验通过后再启动服务：
+覆盖完成、校验通过后再加入小时任务。全新安装时服务通常已在运行，可先确认：
 
 ```bash
-sudo systemctl start doris-partition-sync
 sudo systemctl status doris-partition-sync --no-pager
 ```
+
+如果之前为避免与已有任务冲突而停止了服务，此时再运行 `sudo systemctl start doris-partition-sync`。服务运行本身不会产生小时任务；只有执行下面的 `task add` 后才开始同步该表。
 
 小时增量要求每张表选择一个 `DATETIME` 字段。先在源端 `DESC journal_okx.<表名>` 核对字段；清单未提供字段定义，本手册不猜测列名。再确认目标端准备开始的每个小时范围**没有已经导入的行**。小时模式使用普通 `INSERT`，对已有行的小时重放会重复写入（尤其是 Duplicate Key 表）。对不满足时间字段或目标空窗条件的表，不要直接添加小时任务。
 
@@ -186,7 +190,7 @@ sudo -u doris-partition-sync /opt/doris-partition-sync/doris-partition-sync task
   --state-file /var/lib/doris-partition-sync/partition-sync-state.db \
   --source-db journal_okx --target-db journal_okx \
   --table journal_history_position_v2 \
-  --time-field <DATETIME_FIELD> \
+  --time-field REAL_DATETIME_COLUMN \
   --start '2026-10-02 08:00:00' --time-zone Asia/Shanghai
 ```
 
