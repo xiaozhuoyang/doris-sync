@@ -94,6 +94,16 @@ func (d *database) exec(ctx context.Context, statement string) error {
 	return d.withConn(ctx, func(conn *sql.Conn) error { _, err := conn.ExecContext(ctx, statement); return err })
 }
 
+func (d *database) execAutoPartitionOverwrite(ctx context.Context, statement string) error {
+	return d.withConn(ctx, func(conn *sql.Conn) error {
+		if _, err := conn.ExecContext(ctx, "SET enable_auto_create_when_overwrite = true"); err != nil {
+			return fmt.Errorf("enable automatic partition creation for overwrite: %w", err)
+		}
+		_, err := conn.ExecContext(ctx, statement)
+		return err
+	})
+}
+
 func (d *database) query(ctx context.Context, statement string) ([]map[string]string, error) {
 	var result []map[string]string
 	err := d.withConn(ctx, func(conn *sql.Conn) error {

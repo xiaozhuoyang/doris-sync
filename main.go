@@ -808,6 +808,12 @@ func (s *syncer) syncPartition(ctx context.Context, pair DatabasePair, table str
 		if err := s.target.exec(ctx, statement); err != nil {
 			return fmt.Errorf("overwrite target partition %s: %w", targetPart.Name, err)
 		}
+	} else if s.options.ForceOverwrite && len(entry.Objects) > 0 {
+		s.logger.Printf("OVERWRITE_AUTO_PARTITION_START database=%s table=%s source_partition=%s files=%d", pair.Target, table, part.Name, len(entry.Objects))
+		statement := overwriteAutoPartitionSQL(pair.Target, table, s.store.uri(prefix)+"*.parquet", columns, s.options.S3)
+		if err := s.target.execAutoPartitionOverwrite(ctx, statement); err != nil {
+			return fmt.Errorf("overwrite missing AUTO PARTITION for source %s: %w", part.Name, err)
+		}
 	} else if len(entry.Objects) > 0 {
 		s.logger.Printf("IMPORT_START database=%s table=%s partition=%s files=%d", pair.Target, table, part.Name, len(entry.Objects))
 		if err := s.target.exec(ctx, importSQL(pair.Target, table, s.store.uri(prefix)+"*.parquet", columns, s.options.S3)); err != nil {

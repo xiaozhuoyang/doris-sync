@@ -18,7 +18,7 @@ mkdir -p "$stage/$name"
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' \
     -o "$stage/$name/doris-partition-sync" .
 )
-cp "$root/deploy/install.sh" "$root/deploy/run.sh" "$root/partition-sync.example.json" "$root/overwrite-plan.example.json" "$root/deploy/partition-sync.env.example" "$root/README.md" "$stage/$name/"
+cp "$root/deploy/install.sh" "$root/deploy/run.sh" "$root/partition-sync.example.json" "$root/overwrite-plan.example.json" "$root/overwrite-plan-journal-okx-20261002.json" "$root/deploy/partition-sync.env.example" "$root/README.md" "$stage/$name/"
 chmod 755 "$stage/$name/install.sh" "$stage/$name/run.sh" "$stage/$name/doris-partition-sync"
 (
   cd "$stage/$name"

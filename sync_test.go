@@ -315,6 +315,10 @@ func TestOverwriteSQL(t *testing.T) {
 	if !strings.Contains(empty, "FROM `dst`.`events` WHERE 1 = 0") || strings.Contains(empty, "s3(") {
 		t.Fatal(empty)
 	}
+	auto := overwriteAutoPartitionSQL("dst", "events", "s3://b/p/*.parquet", []string{"id", "dt"}, cfg)
+	if !strings.Contains(auto, "INSERT OVERWRITE TABLE `dst`.`events` PARTITION(*)") || !strings.Contains(auto, `"uri" = "s3://b/p/*.parquet"`) {
+		t.Fatal(auto)
+	}
 }
 
 func TestTimeWindowSQL(t *testing.T) {

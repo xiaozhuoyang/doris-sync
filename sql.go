@@ -136,6 +136,10 @@ func overwriteSQL(db, table, partition, uri string, columns []string, empty bool
 	return overwriteSelectSQL(db, table, " PARTITION("+ident(partition)+")", uri, columns, empty, cfg)
 }
 
+func overwriteAutoPartitionSQL(db, table, uri string, columns []string, cfg S3Options) string {
+	return overwriteSelectSQL(db, table, " PARTITION(*)", uri, columns, false, cfg)
+}
+
 func overwriteTableSQL(db, table, uri string, columns []string, empty bool, cfg S3Options) string {
 	return overwriteSelectSQL(db, table, "", uri, columns, empty, cfg)
 }

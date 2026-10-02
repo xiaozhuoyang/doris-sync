@@ -14,16 +14,16 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o dist/doris-partition-sync-linu
 Build a self-contained Linux amd64 package on macOS or Linux:
 
 ```bash
-sh deploy/build-package.sh v1.0.13
+sh deploy/build-package.sh v1.0.14
 ```
 
-The resulting `dist/doris-partition-sync-v1.0.13-linux-amd64.tar.gz` contains the static executable, example config, overwrite-plan example, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
+The resulting `dist/doris-partition-sync-v1.0.14-linux-amd64.tar.gz` contains the static executable, example config, overwrite-plan example, the `journal_okx` discrepancy plan, environment template, README, and a systemd installer. SQLite is linked into the executable by the pure-Go driver; neither CGO nor a system `sqlite3` package is required to run it. The optional `sqlite3` CLI is only useful for manual state inspection.
 
 On the Linux host, extract the package, prepare real config and credentials, then install and start the service:
 
 ```bash
-tar -xzf doris-partition-sync-v1.0.13-linux-amd64.tar.gz
-cd doris-partition-sync-v1.0.13-linux-amd64
+tar -xzf doris-partition-sync-v1.0.14-linux-amd64.tar.gz
+cd doris-partition-sync-v1.0.14-linux-amd64
 cp partition-sync.example.json partition-sync.json
 cp partition-sync.env.example partition-sync.env
 # Edit partition-sync.json and partition-sync.env for your source, target, bucket, and credentials.
@@ -161,7 +161,7 @@ For **multiple tables and partitions**, put them in a separate JSON plan (see `o
   --s3-prefix backups/partition-overwrite/run01
 ```
 
-The plan checks **all** source tables, target tables, column layouts, and selected partition ranges before starting the first export. Tables execute in JSON order; partitions within each table execute from oldest range to newest. An error stops the run before later tables. `--overwrite-plan` cannot be combined with `--table`, `--partitions`, or table/partition filters in the connection config. Use a new state file and disjoint S3 prefix for a separate run; retrying the same plan will re-export its selected partitions. The plan file has no credentials.
+The plan checks **all** source tables, target tables, column layouts, and selected partition ranges before starting the first export. Tables execute in JSON order; partitions within each table execute from oldest range to newest. An error stops the run before later tables. If a selected target range already exists under a different partition name, the tool overwrites that actual target name. If a target AUTO PARTITION range is missing and the source backup has rows, forced overwrite uses `INSERT OVERWRITE ... PARTITION(*)` with `enable_auto_create_when_overwrite=true` on the same SQL connection to create it without replacing the whole table. An empty missing source range needs no target partition. `--overwrite-plan` cannot be combined with `--table`, `--partitions`, or table/partition filters in the connection config. Use a new state file and disjoint S3 prefix for a separate run; retrying the same plan will re-export its selected partitions. The plan file has no credentials.
 
 Do not run this operation concurrently with an hourly task writing the same target table. Stop the hourly service only between import windows; interrupting a synchronous INSERT can leave its outcome unknown. A failed partition is recorded in the separate state file, and the forced run stops before later partitions; inspect `PARTITION_FAILED` before retrying. A forced run refreshes the selected partition backups again when repeated.
 
